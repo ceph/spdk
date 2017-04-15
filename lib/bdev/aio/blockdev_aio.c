@@ -43,12 +43,11 @@
 
 #include "spdk/bdev.h"
 #include "spdk/conf.h"
+#include "spdk/env.h"
 #include "spdk/fd.h"
 #include "spdk/io_channel.h"
 
 #include "spdk_internal/log.h"
-
-static int g_blockdev_count = 0;
 
 static int blockdev_aio_initialize(void);
 static void aio_free_disk(struct file_disk *fdisk);
@@ -161,9 +160,9 @@ blockdev_aio_flush(struct file_disk *fdisk, struct blockdev_aio_task *aio_task,
 }
 
 static int
-blockdev_aio_destruct(struct spdk_bdev *bdev)
+blockdev_aio_destruct(void *ctx)
 {
-	struct file_disk *fdisk = (struct file_disk *)bdev;
+	struct file_disk *fdisk = ctx;
 	int rc = 0;
 
 	rc = blockdev_aio_close(fdisk);
@@ -282,7 +281,7 @@ static void blockdev_aio_submit_request(struct spdk_bdev_io *bdev_io)
 }
 
 static bool
-blockdev_aio_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_type)
+blockdev_aio_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 {
 	switch (io_type) {
 	case SPDK_BDEV_IO_TYPE_READ:
@@ -306,7 +305,7 @@ blockdev_aio_create_cb(void *io_device, uint32_t priority, void *ctx_buf, void *
 	}
 
 	spdk_poller_register(&ch->poller, blockdev_aio_poll, ch,
-			     spdk_app_get_current_core(), 0);
+			     spdk_env_get_current_core(), 0);
 	return 0;
 }
 
@@ -321,9 +320,11 @@ blockdev_aio_destroy_cb(void *io_device, void *ctx_buf)
 }
 
 static struct spdk_io_channel *
-blockdev_aio_get_io_channel(struct spdk_bdev *bdev, uint32_t priority)
+blockdev_aio_get_io_channel(void *ctx, uint32_t priority)
 {
-	return spdk_get_io_channel(bdev, priority, false, NULL);
+	struct file_disk *fdisk = ctx;
+
+	return spdk_get_io_channel(&fdisk->fd, priority, false, NULL);
 }
 
 static const struct spdk_bdev_fn_table aio_fn_table = {
@@ -341,7 +342,7 @@ static void aio_free_disk(struct file_disk *fdisk)
 }
 
 struct spdk_bdev *
-create_aio_disk(char *fname)
+create_aio_disk(const char *name, const char *fname)
 {
 	struct file_disk *fdisk;
 
@@ -360,8 +361,7 @@ create_aio_disk(char *fname)
 	fdisk->size = spdk_fd_get_size(fdisk->fd);
 
 	TAILQ_INIT(&fdisk->sync_completion_list);
-	snprintf(fdisk->disk.name, SPDK_BDEV_MAX_NAME_LENGTH, "AIO%d",
-		 g_blockdev_count);
+	snprintf(fdisk->disk.name, SPDK_BDEV_MAX_NAME_LENGTH, "%s", name);
 	snprintf(fdisk->disk.product_name, SPDK_BDEV_MAX_PRODUCT_NAME_LENGTH, "AIO disk");
 
 	fdisk->disk.need_aligned_buffer = 1;
@@ -371,9 +371,8 @@ create_aio_disk(char *fname)
 	fdisk->disk.ctxt = fdisk;
 
 	fdisk->disk.fn_table = &aio_fn_table;
-	g_blockdev_count++;
 
-	spdk_io_device_register(&fdisk->disk, blockdev_aio_create_cb, blockdev_aio_destroy_cb,
+	spdk_io_device_register(&fdisk->fd, blockdev_aio_create_cb, blockdev_aio_destroy_cb,
 				sizeof(struct blockdev_aio_io_channel));
 	spdk_bdev_register(&fdisk->disk);
 	return &fdisk->disk;
@@ -386,38 +385,42 @@ error_return:
 
 static int blockdev_aio_initialize(void)
 {
+	size_t i;
+	struct spdk_conf_section *sp;
 	struct spdk_bdev *bdev;
-	int i;
-	const char *val = NULL;
-	char *file;
-	struct spdk_conf_section *sp = spdk_conf_find_section(NULL, "AIO");
-	bool skip_missing = false;
 
-	if (sp != NULL) {
-		val = spdk_conf_section_get_val(sp, "SkipMissingFiles");
-	}
-	if (val != NULL && !strcmp(val, "Yes")) {
-		skip_missing = true;
+	sp = spdk_conf_find_section(NULL, "AIO");
+	if (!sp) {
+		return 0;
 	}
 
-	if (sp != NULL) {
-		for (i = 0; ; i++) {
-			val = spdk_conf_section_get_nval(sp, "AIO", i);
-			if (val == NULL)
-				break;
-			file = spdk_conf_section_get_nmval(sp, "AIO", i, 0);
-			if (file == NULL) {
-				SPDK_ERRLOG("AIO%d: format error\n", i);
-				return -1;
-			}
+	i = 0;
+	while (true) {
+		const char *file;
+		const char *name;
 
-			bdev = create_aio_disk(file);
-
-			if (bdev == NULL && !skip_missing) {
-				return -1;
-			}
+		file = spdk_conf_section_get_nmval(sp, "AIO", i, 0);
+		if (!file) {
+			break;
 		}
+
+		name = spdk_conf_section_get_nmval(sp, "AIO", i, 1);
+		if (!name) {
+			SPDK_ERRLOG("No name provided for AIO disk with file %s\n", file);
+			i++;
+			continue;
+		}
+
+		bdev = create_aio_disk(name, file);
+		if (!bdev) {
+			SPDK_ERRLOG("Unable to create AIO bdev from file %s\n", file);
+			i++;
+			continue;
+		}
+
+		i++;
 	}
+
 	return 0;
 }
 

@@ -1,6 +1,23 @@
 # Changelog
 
-## (Next Planned Release) v17.03
+## v17.03: Blobstore and userspace vhost-scsi target
+
+### Blobstore and BlobFS
+
+The blobstore is a persistent, power-fail safe block allocator designed to be
+used as the local storage system backing a higher-level storage service.
+See the [blobstore documentation](http://www.spdk.io/doc/blob.html) for more details.
+
+BlobFS adds basic filesystem functionality like filenames on top of the blobstore.
+This release also includes a RocksDB Env implementation using BlobFS in place of the
+kernel filesystem.
+See the [BlobFS documentation](http://www.spdk.io/doc/blobfs.html) for more details.
+
+### Userspace vhost-scsi target
+
+A userspace implementation of the QEMU vhost-scsi protocol has been added.
+The vhost target is capable of exporting SPDK bdevs to QEMU-based VMs as virtio devices.
+See the [vhost documentation](http://www.spdk.io/doc/vhost.html) for more details.
 
 ### Event framework
 
@@ -16,6 +33,22 @@ support SGLs.
 The `identify` and `perf` NVMe examples were modified to add a consistent format for
 specifying remote NVMe over Fabrics devices via the `-r` option.
 This is implemented using the new `spdk_nvme_transport_id_parse()` function.
+
+### iSCSI Target
+
+The [Nvme] section of the configuration file was modified to remove the `BDF` directive
+and replace it with a `TransportID` directive. Both local (PCIe) and remote (NVMe-oF)
+devices can now be specified as the backing block device. A script to generate an
+entire [Nvme] section based on the local NVMe devices attached was added at
+`scripts/gen_nvme.sh`.
+
+### NVMe-oF Target
+
+The [Nvme] section of the configuration file was modified to remove the `BDF` directive
+and replace it with a `TransportID` directive. Both local (PCIe) and remote (NVMe-oF)
+devices can now be specified as the backing block device. A script to generate an
+entire [Nvme] section based on the local NVMe devices attached was added at
+`scripts/gen_nvme.sh`.
 
 ## v16.12: NVMe over Fabrics host, hotplug, and multi-process
 

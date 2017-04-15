@@ -3,22 +3,25 @@ ulimit -c unlimited
 
 export RUN_NIGHTLY=0
 
-MAKECONFIG='CONFIG_DEBUG=y CONFIG_WERROR=y'
+config_params='--enable-debug --enable-werror'
 
-export UBSAN_OPTIONS=halt_on_error=1
+export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:abort_on_error=1'
+
+# Override the default NRHUGE in scripts/setup.sh
+export NRHUGE=4096
 
 case `uname` in
 	FreeBSD)
-		DPDK_DIR=/usr/local/share/dpdk/x86_64-native-bsdapp-clang
+		config_params+=' --with-dpdk=/usr/local/share/dpdk/x86_64-native-bsdapp-clang'
 		MAKE=gmake
 		MAKEFLAGS=${MAKEFLAGS:--j$(sysctl -a | egrep -i 'hw.ncpu' | awk '{print $2}')}
 		;;
 	Linux)
-		DPDK_DIR=/usr/local/share/dpdk/x86_64-native-linuxapp-gcc
+		config_params+=' --with-dpdk=/usr/local/share/dpdk/x86_64-native-linuxapp-gcc'
 		MAKE=make
 		MAKEFLAGS=${MAKEFLAGS:--j$(nproc)}
-		MAKECONFIG="$MAKECONFIG CONFIG_COVERAGE=y"
-		MAKECONFIG="$MAKECONFIG CONFIG_UBSAN=y"
+		config_params+=' --enable-coverage'
+		config_params+=' --enable-ubsan'
 		;;
 	*)
 		echo "Unknown OS in $0"
@@ -27,8 +30,18 @@ case `uname` in
 esac
 
 if [ -f /usr/include/infiniband/verbs.h ]; then
-	MAKECONFIG="$MAKECONFIG CONFIG_RDMA=y"
+	config_params+=' --with-rdma'
 fi
+
+if [ -d /usr/src/fio ]; then
+	config_params+=' --with-fio=/usr/src/fio'
+fi
+
+if [ -d /usr/include/rbd ] &&  [ -d /usr/include/rados ]; then
+	config_params+=' --with-rbd'
+fi
+
+export config_params
 
 if [ -z "$output_dir" ]; then
 	if [ -z "$rootdir" ] || [ ! -d "$rootdir/../output" ]; then
@@ -93,12 +106,12 @@ function timing_finish() {
 
 function process_core() {
 	ret=0
-	for core in $(find . -type f -name 'core*'); do
+	for core in $(find . -type f \( -name 'core*' -o -name '*.core' \)); do
 		exe=$(eu-readelf -n "$core" | grep psargs | sed "s/.*psargs: \([^ \'\" ]*\).*/\1/")
 		echo "exe for $core is $exe"
 		if [[ ! -z "$exe" ]]; then
 			if hash gdb; then
-				gdb -batch -ex "bt" $exe $core
+				gdb -batch -ex "bt full" $exe $core
 			fi
 			cp $exe $output_dir
 		fi
@@ -196,3 +209,26 @@ function run_test() {
 	echo "************************************"
 	set -x
 }
+
+function print_backtrace() {
+	set +x
+	echo "========== Backtrace start: =========="
+	echo ""
+	for i in $(seq 1 $((${#FUNCNAME[@]} - 1))); do
+		local func="${FUNCNAME[$i]}"
+		local line_nr="${BASH_LINENO[$((i - 1))]}"
+		local src="${BASH_SOURCE[$i]/#$rootdir/.}"
+		echo "in $src:$line_nr -> $func()"
+		echo "     ..."
+		nl -w 4 -ba -nln $src | grep -B 5 -A 5 "^$line_nr" | \
+			sed "s/^/   /g" | sed "s/^   $line_nr /=> $line_nr /g"
+		echo "     ..."
+	done
+	echo ""
+	echo "========== Backtrace end =========="
+	set -x
+	return 0
+}
+
+set -o errtrace
+trap "trap - ERR; print_backtrace >&2" ERR

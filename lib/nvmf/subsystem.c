@@ -122,13 +122,19 @@ spdk_nvmf_subsystem_host_allowed(struct spdk_nvmf_subsystem *subsystem, const ch
 	return false;
 }
 
+int
+spdk_nvmf_subsystem_start(struct spdk_nvmf_subsystem *subsystem)
+{
+	return subsystem->ops->attach(subsystem);
+}
+
 void
 spdk_nvmf_subsystem_poll(struct spdk_nvmf_subsystem *subsystem)
 {
 	struct spdk_nvmf_session *session;
 
-	/* For NVMe subsystems, check the backing physical device for completions. */
-	if (subsystem->subtype == SPDK_NVMF_SUBTYPE_NVME) {
+	/* Check the backing physical device for completions. */
+	if (subsystem->ops->poll_for_completions) {
 		subsystem->ops->poll_for_completions(subsystem);
 	}
 
@@ -183,18 +189,24 @@ spdk_nvmf_create_subsystem(const char *nqn,
 		return NULL;
 	}
 
+	g_nvmf_tgt.current_subsystem_id++;
+
+	subsystem->id = g_nvmf_tgt.current_subsystem_id;
 	subsystem->subtype = type;
 	subsystem->mode = mode;
 	subsystem->cb_ctx = cb_ctx;
 	subsystem->connect_cb = connect_cb;
 	subsystem->disconnect_cb = disconnect_cb;
 	snprintf(subsystem->subnqn, sizeof(subsystem->subnqn), "%s", nqn);
-	TAILQ_INIT(&subsystem->listen_addrs);
+	TAILQ_INIT(&subsystem->allowed_listeners);
 	TAILQ_INIT(&subsystem->hosts);
 	TAILQ_INIT(&subsystem->sessions);
 
-	if (mode == NVMF_SUBSYSTEM_MODE_DIRECT) {
+	if (type == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+		subsystem->ops = &spdk_nvmf_discovery_ctrlr_ops;
+	} else if (mode == NVMF_SUBSYSTEM_MODE_DIRECT) {
 		subsystem->ops = &spdk_nvmf_direct_ctrlr_ops;
+		subsystem->dev.direct.outstanding_admin_cmd_count = 0;
 	} else {
 		subsystem->ops = &spdk_nvmf_virtual_ctrlr_ops;
 	}
@@ -208,7 +220,7 @@ spdk_nvmf_create_subsystem(const char *nqn,
 void
 spdk_nvmf_delete_subsystem(struct spdk_nvmf_subsystem *subsystem)
 {
-	struct spdk_nvmf_listen_addr	*listen_addr, *listen_addr_tmp;
+	struct spdk_nvmf_subsystem_allowed_listener	*allowed_listener, *allowed_listener_tmp;
 	struct spdk_nvmf_host		*host, *host_tmp;
 	struct spdk_nvmf_session	*session, *session_tmp;
 
@@ -218,10 +230,11 @@ spdk_nvmf_delete_subsystem(struct spdk_nvmf_subsystem *subsystem)
 
 	SPDK_TRACELOG(SPDK_TRACE_NVMF, "subsystem is %p\n", subsystem);
 
-	TAILQ_FOREACH_SAFE(listen_addr, &subsystem->listen_addrs, link, listen_addr_tmp) {
-		TAILQ_REMOVE(&subsystem->listen_addrs, listen_addr, link);
-		spdk_nvmf_listen_addr_destroy(listen_addr);
-		subsystem->num_listen_addrs--;
+	TAILQ_FOREACH_SAFE(allowed_listener,
+			   &subsystem->allowed_listeners, link, allowed_listener_tmp) {
+		TAILQ_REMOVE(&subsystem->allowed_listeners, allowed_listener, link);
+
+		free(allowed_listener);
 	}
 
 	TAILQ_FOREACH_SAFE(host, &subsystem->hosts, link, host_tmp) {
@@ -245,36 +258,83 @@ spdk_nvmf_delete_subsystem(struct spdk_nvmf_subsystem *subsystem)
 	free(subsystem);
 }
 
-int
-spdk_nvmf_subsystem_add_listener(struct spdk_nvmf_subsystem *subsystem,
-				 const char *trname, const char *traddr, const char *trsvcid)
+struct spdk_nvmf_listen_addr *
+spdk_nvmf_tgt_listen(const char *trname, const char *traddr, const char *trsvcid)
 {
 	struct spdk_nvmf_listen_addr *listen_addr;
 	const struct spdk_nvmf_transport *transport;
 	int rc;
 
+	TAILQ_FOREACH(listen_addr, &g_nvmf_tgt.listen_addrs, link) {
+		if ((strcmp(listen_addr->trname, trname) == 0) &&
+		    (strcmp(listen_addr->traddr, traddr) == 0) &&
+		    (strcmp(listen_addr->trsvcid, trsvcid) == 0)) {
+			return listen_addr;
+		}
+	}
+
 	transport = spdk_nvmf_transport_get(trname);
 	if (!transport) {
-		return -1;
+		SPDK_ERRLOG("Unknown transport '%s'\n", trname);
+		return NULL;
 	}
 
 	listen_addr = spdk_nvmf_listen_addr_create(trname, traddr, trsvcid);
 	if (!listen_addr) {
-		return -1;
+		return NULL;
 	}
 
 	rc = transport->listen_addr_add(listen_addr);
 	if (rc < 0) {
 		spdk_nvmf_listen_addr_cleanup(listen_addr);
 		SPDK_ERRLOG("Unable to listen on address '%s'\n", traddr);
+		return NULL;
+	}
+
+	TAILQ_INSERT_HEAD(&g_nvmf_tgt.listen_addrs, listen_addr, link);
+	g_nvmf_tgt.discovery_genctr++;
+
+	return listen_addr;
+}
+
+int
+spdk_nvmf_subsystem_add_listener(struct spdk_nvmf_subsystem *subsystem,
+				 struct spdk_nvmf_listen_addr *listen_addr)
+{
+	struct spdk_nvmf_subsystem_allowed_listener *allowed_listener;
+
+	allowed_listener = calloc(1, sizeof(*allowed_listener));
+	if (!allowed_listener) {
 		return -1;
 	}
 
-	TAILQ_INSERT_HEAD(&subsystem->listen_addrs, listen_addr, link);
-	subsystem->num_listen_addrs++;
-	g_nvmf_tgt.discovery_genctr++;
+	allowed_listener->listen_addr = listen_addr;
+
+	TAILQ_INSERT_HEAD(&subsystem->allowed_listeners, allowed_listener, link);
 
 	return 0;
+}
+
+/*
+ * TODO: this is the whitelist and will be called during connection setup
+ */
+bool
+spdk_nvmf_subsystem_listener_allowed(struct spdk_nvmf_subsystem *subsystem,
+				     struct spdk_nvmf_listen_addr *listen_addr)
+{
+	struct spdk_nvmf_subsystem_allowed_listener *allowed_listener;
+
+	if (TAILQ_EMPTY(&subsystem->allowed_listeners)) {
+		return true;
+	}
+
+	TAILQ_FOREACH(allowed_listener, &subsystem->allowed_listeners, link) {
+		if (allowed_listener->listen_addr == listen_addr) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 int
@@ -305,116 +365,21 @@ nvmf_subsystem_add_ctrlr(struct spdk_nvmf_subsystem *subsystem,
 {
 	subsystem->dev.direct.ctrlr = ctrlr;
 	subsystem->dev.direct.pci_addr = *pci_addr;
-	/* Assume that all I/O will be handled on one thread for now */
-	subsystem->dev.direct.io_qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, 0);
-	if (subsystem->dev.direct.io_qpair == NULL) {
-		SPDK_ERRLOG("spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
-		return -1;
-	}
+
 	return 0;
 }
 
-static void
-nvmf_update_discovery_log(void)
+static void spdk_nvmf_ctrlr_hot_remove(void *remove_ctx)
 {
-	uint64_t numrec = 0;
-	struct spdk_nvmf_subsystem *subsystem;
-	struct spdk_nvmf_listen_addr *listen_addr;
-	struct spdk_nvmf_discovery_log_page_entry *entry;
-	const struct spdk_nvmf_transport *transport;
-	struct spdk_nvmf_discovery_log_page *disc_log;
-	size_t cur_size;
+	struct spdk_nvmf_subsystem *subsystem = (struct spdk_nvmf_subsystem *)remove_ctx;
 
-	SPDK_TRACELOG(SPDK_TRACE_NVMF, "Generating log page for genctr %" PRIu64 "\n",
-		      g_nvmf_tgt.discovery_genctr);
-
-	cur_size = sizeof(struct spdk_nvmf_discovery_log_page);
-	disc_log = calloc(1, cur_size);
-	if (disc_log == NULL) {
-		SPDK_ERRLOG("Discovery log page memory allocation error\n");
-		return;
-	}
-
-	TAILQ_FOREACH(subsystem, &g_nvmf_tgt.subsystems, entries) {
-		if (subsystem->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
-			continue;
-		}
-
-		TAILQ_FOREACH(listen_addr, &subsystem->listen_addrs, link) {
-			size_t new_size = cur_size + sizeof(*entry);
-			void *new_log_page = realloc(disc_log, new_size);
-
-			if (new_log_page == NULL) {
-				SPDK_ERRLOG("Discovery log page memory allocation error\n");
-				break;
-			}
-
-			disc_log = new_log_page;
-			cur_size = new_size;
-
-			entry = &disc_log->entries[numrec];
-			memset(entry, 0, sizeof(*entry));
-			entry->portid = numrec;
-			entry->cntlid = 0xffff;
-			entry->asqsz = g_nvmf_tgt.max_queue_depth;
-			entry->subtype = subsystem->subtype;
-			snprintf(entry->subnqn, sizeof(entry->subnqn), "%s", subsystem->subnqn);
-
-			transport = spdk_nvmf_transport_get(listen_addr->trname);
-			assert(transport != NULL);
-
-			transport->listen_addr_discover(listen_addr, entry);
-
-			numrec++;
-		}
-	}
-
-	disc_log->numrec = numrec;
-	disc_log->genctr = g_nvmf_tgt.discovery_genctr;
-
-	free(g_nvmf_tgt.discovery_log_page);
-
-	g_nvmf_tgt.discovery_log_page = disc_log;
-	g_nvmf_tgt.discovery_log_page_size = cur_size;
-}
-
-void
-spdk_nvmf_get_discovery_log_page(void *buffer, uint64_t offset, uint32_t length)
-{
-	size_t copy_len = 0;
-	size_t zero_len = length;
-
-	if (g_nvmf_tgt.discovery_log_page == NULL ||
-	    g_nvmf_tgt.discovery_log_page->genctr != g_nvmf_tgt.discovery_genctr) {
-		nvmf_update_discovery_log();
-	}
-
-	/* Copy the valid part of the discovery log page, if any */
-	if (g_nvmf_tgt.discovery_log_page && offset < g_nvmf_tgt.discovery_log_page_size) {
-		copy_len = spdk_min(g_nvmf_tgt.discovery_log_page_size - offset, length);
-		zero_len -= copy_len;
-		memcpy(buffer, (char *)g_nvmf_tgt.discovery_log_page + offset, copy_len);
-	}
-
-	/* Zero out the rest of the buffer */
-	if (zero_len) {
-		memset((char *)buffer + copy_len, 0, zero_len);
-	}
-
-	/* We should have copied or zeroed every byte of the output buffer. */
-	assert(copy_len + zero_len == length);
+	subsystem->is_removed = true;
 }
 
 int
 spdk_nvmf_subsystem_add_ns(struct spdk_nvmf_subsystem *subsystem, struct spdk_bdev *bdev)
 {
 	int i = 0;
-
-	if (!spdk_bdev_claim(bdev)) {
-		SPDK_ERRLOG("Subsystem %s: bdev %s is already claimed\n",
-			    subsystem->subnqn, bdev->name);
-		return -1;
-	}
 
 	assert(subsystem->mode == NVMF_SUBSYSTEM_MODE_VIRTUAL);
 	while (i < MAX_VIRTUAL_NAMESPACE && subsystem->dev.virt.ns_list[i]) {
@@ -424,6 +389,13 @@ spdk_nvmf_subsystem_add_ns(struct spdk_nvmf_subsystem *subsystem, struct spdk_bd
 		SPDK_ERRLOG("spdk_nvmf_subsystem_add_ns() failed\n");
 		return -1;
 	}
+
+	if (!spdk_bdev_claim(bdev, spdk_nvmf_ctrlr_hot_remove, subsystem)) {
+		SPDK_ERRLOG("Subsystem %s: bdev %s is already claimed\n",
+			    subsystem->subnqn, bdev->name);
+		return -1;
+	}
+
 	subsystem->dev.virt.ns_list[i] = bdev;
 	subsystem->dev.virt.ns_count++;
 	return 0;

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 testdir=$(readlink -f $(dirname $0))
-rootdir=$testdir/../../..
+rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/scripts/autotest_common.sh
+
+if [ ! -d /usr/local/calsoft ]; then
+	echo "skipping calsoft tests"
+	exit 0
+fi
 
 if [ -z "$TARGET_IP" ]; then
 	echo "TARGET_IP not defined in environment"

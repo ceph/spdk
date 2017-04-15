@@ -41,6 +41,7 @@
 
 const struct spdk_nvmf_ctrlr_ops spdk_nvmf_direct_ctrlr_ops;
 const struct spdk_nvmf_ctrlr_ops spdk_nvmf_virtual_ctrlr_ops;
+const struct spdk_nvmf_ctrlr_ops spdk_nvmf_discovery_ctrlr_ops;
 
 #include "subsystem.c"
 
@@ -137,12 +138,6 @@ spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 	return -1;
 }
 
-struct spdk_nvme_qpair *
-spdk_nvme_ctrlr_alloc_io_qpair(struct spdk_nvme_ctrlr *ctrlr, enum spdk_nvme_qprio qprio)
-{
-	return NULL;
-}
-
 int
 spdk_nvme_detach(struct spdk_nvme_ctrlr *ctrlr)
 {
@@ -161,7 +156,8 @@ spdk_nvmf_session_poll(struct spdk_nvmf_session *session)
 }
 
 bool
-spdk_bdev_claim(struct spdk_bdev *bdev)
+spdk_bdev_claim(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb,
+		void *remove_ctx)
 {
 	return true;
 }
@@ -208,83 +204,6 @@ nvmf_test_find_subsystem(void)
 	CU_ASSERT_PTR_NULL(nvmf_find_subsystem("fake"));
 }
 
-static bool
-all_zero(const void *buf, size_t size)
-{
-	const uint8_t *b = buf;
-
-	while (size--) {
-		if (*b != 0) {
-			return false;
-		}
-		b++;
-	}
-
-	return true;
-}
-
-static void
-test_discovery_log(void)
-{
-	struct spdk_nvmf_subsystem *subsystem;
-	uint8_t buffer[8192];
-	struct spdk_nvmf_discovery_log_page *disc_log;
-	struct spdk_nvmf_discovery_log_page_entry *entry;
-
-	/* Reset discovery-related globals */
-	g_nvmf_tgt.discovery_genctr = 0;
-	free(g_nvmf_tgt.discovery_log_page);
-	g_nvmf_tgt.discovery_log_page = NULL;
-	g_nvmf_tgt.discovery_log_page_size = 0;
-
-	/* Add one subsystem and verify that the discovery log contains it */
-	subsystem = spdk_nvmf_create_subsystem("nqn.2016-06.io.spdk:subsystem1", SPDK_NVMF_SUBTYPE_NVME,
-					       NVMF_SUBSYSTEM_MODE_DIRECT, NULL, NULL, NULL);
-	SPDK_CU_ASSERT_FATAL(subsystem != NULL);
-
-	SPDK_CU_ASSERT_FATAL(spdk_nvmf_subsystem_add_listener(subsystem, "test_transport1",
-			     "1234", "5678") == 0);
-
-	/* Get only genctr (first field in the header) */
-	memset(buffer, 0xCC, sizeof(buffer));
-	disc_log = (struct spdk_nvmf_discovery_log_page *)buffer;
-	spdk_nvmf_get_discovery_log_page(buffer, 0, sizeof(disc_log->genctr));
-	CU_ASSERT(disc_log->genctr == 2); /* one added subsystem + one added listen address */
-
-	/* Get only the header, no entries */
-	memset(buffer, 0xCC, sizeof(buffer));
-	disc_log = (struct spdk_nvmf_discovery_log_page *)buffer;
-	spdk_nvmf_get_discovery_log_page(buffer, 0, sizeof(*disc_log));
-	CU_ASSERT(disc_log->genctr == 2);
-	CU_ASSERT(disc_log->numrec == 1);
-
-	/* Offset 0, exact size match */
-	memset(buffer, 0xCC, sizeof(buffer));
-	disc_log = (struct spdk_nvmf_discovery_log_page *)buffer;
-	spdk_nvmf_get_discovery_log_page(buffer, 0, sizeof(*disc_log) + sizeof(disc_log->entries[0]));
-	CU_ASSERT(disc_log->genctr != 0);
-	CU_ASSERT(disc_log->numrec == 1);
-	CU_ASSERT(disc_log->entries[0].trtype == 42);
-
-	/* Offset 0, oversize buffer */
-	memset(buffer, 0xCC, sizeof(buffer));
-	disc_log = (struct spdk_nvmf_discovery_log_page *)buffer;
-	spdk_nvmf_get_discovery_log_page(buffer, 0, sizeof(buffer));
-	CU_ASSERT(disc_log->genctr != 0);
-	CU_ASSERT(disc_log->numrec == 1);
-	CU_ASSERT(disc_log->entries[0].trtype == 42);
-	CU_ASSERT(all_zero(buffer + sizeof(*disc_log) + sizeof(disc_log->entries[0]),
-			   sizeof(buffer) - (sizeof(*disc_log) + sizeof(disc_log->entries[0]))));
-
-	/* Get just the first entry, no header */
-	memset(buffer, 0xCC, sizeof(buffer));
-	entry = (struct spdk_nvmf_discovery_log_page_entry *)buffer;
-	spdk_nvmf_get_discovery_log_page(buffer,
-					 offsetof(struct spdk_nvmf_discovery_log_page, entries[0]),
-					 sizeof(*entry));
-	CU_ASSERT(entry->trtype == 42);
-}
-
 int main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
@@ -302,8 +221,7 @@ int main(int argc, char **argv)
 
 	if (
 		CU_add_test(suite, "create_subsystem", nvmf_test_create_subsystem) == NULL ||
-		CU_add_test(suite, "find_subsystem", nvmf_test_find_subsystem) == NULL ||
-		CU_add_test(suite, "discovery_log", test_discovery_log) == NULL) {
+		CU_add_test(suite, "find_subsystem", nvmf_test_find_subsystem) == NULL) {
 		CU_cleanup_registry();
 		return CU_get_error();
 	}

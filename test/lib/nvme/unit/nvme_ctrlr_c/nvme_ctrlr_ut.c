@@ -48,7 +48,6 @@ struct spdk_trace_flag SPDK_TRACE_NVME = {
 
 struct nvme_driver _g_nvme_driver = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
-	.request_mempool = NULL,
 };
 
 uint64_t g_ut_tsc = 0;
@@ -156,7 +155,8 @@ nvme_transport_qpair_reset(struct spdk_nvme_qpair *qpair)
 
 int nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 		    struct spdk_nvme_ctrlr *ctrlr,
-		    enum spdk_nvme_qprio qprio)
+		    enum spdk_nvme_qprio qprio,
+		    uint32_t num_requests)
 {
 	qpair->id = id;
 	qpair->qprio = qprio;
@@ -210,7 +210,7 @@ nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *re
 	 * Free the request here so it does not leak.
 	 * For the purposes of this unit test, we don't need to bother emulating request submission.
 	 */
-	spdk_mempool_put(_g_nvme_driver.request_mempool, req);
+	free(req);
 
 	return 0;
 }
@@ -328,12 +328,13 @@ nvme_ns_construct(struct spdk_nvme_ns *ns, uint16_t id,
 }
 
 struct nvme_request *
-nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
+nvme_allocate_request(struct spdk_nvme_qpair *qpair,
+		      const struct nvme_payload *payload, uint32_t payload_size,
 		      spdk_nvme_cmd_cb cb_fn,
 		      void *cb_arg)
 {
 	struct nvme_request *req = NULL;
-	req = spdk_mempool_get(_g_nvme_driver.request_mempool);
+	req = calloc(1, sizeof(*req));
 
 	if (req != NULL) {
 		memset(req, 0, offsetof(struct nvme_request, children));
@@ -343,6 +344,7 @@ nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
 
 		req->cb_fn = cb_fn;
 		req->cb_arg = cb_arg;
+		req->qpair = qpair;
 		req->pid = getpid();
 	}
 
@@ -350,27 +352,27 @@ nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
 }
 
 struct nvme_request *
-nvme_allocate_request_contig(void *buffer, uint32_t payload_size, spdk_nvme_cmd_cb cb_fn,
-			     void *cb_arg)
+nvme_allocate_request_contig(struct spdk_nvme_qpair *qpair, void *buffer, uint32_t payload_size,
+			     spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
 	struct nvme_payload payload;
 
 	payload.type = NVME_PAYLOAD_TYPE_CONTIG;
 	payload.u.contig = buffer;
 
-	return nvme_allocate_request(&payload, payload_size, cb_fn, cb_arg);
+	return nvme_allocate_request(qpair, &payload, payload_size, cb_fn, cb_arg);
 }
 
 struct nvme_request *
-nvme_allocate_request_null(spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+nvme_allocate_request_null(struct spdk_nvme_qpair *qpair, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	return nvme_allocate_request_contig(NULL, 0, cb_fn, cb_arg);
+	return nvme_allocate_request_contig(qpair, NULL, 0, cb_fn, cb_arg);
 }
 
 void
 nvme_free_request(struct nvme_request *req)
 {
-	spdk_mempool_put(_g_nvme_driver.request_mempool, req);
+	free(req);
 }
 
 static void
@@ -403,9 +405,14 @@ test_nvme_ctrlr_init_en_1_rdy_0(void)
 
 	/*
 	 * Transition to CSTS.RDY = 0.
-	 * init() should set CC.EN = 1.
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 0;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+
+	/*
+	 * Transition to CC.EN = 1
+	 */
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -444,9 +451,14 @@ test_nvme_ctrlr_init_en_1_rdy_1(void)
 
 	/*
 	 * Transition to CSTS.RDY = 0.
-	 * init() should set CC.EN = 1.
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 0;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+
+	/*
+	 * Transition to CC.EN = 1
+	 */
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -491,6 +503,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_rr(void)
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.ams == SPDK_NVME_CC_AMS_RR);
@@ -516,6 +532,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_rr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_WRR;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -540,6 +560,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_rr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -564,6 +588,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_rr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS + 1;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -588,6 +616,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_rr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_RR;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -634,6 +666,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr(void)
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.ams == SPDK_NVME_CC_AMS_RR);
@@ -660,6 +696,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr(void)
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.ams == SPDK_NVME_CC_AMS_WRR);
@@ -685,6 +725,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -709,6 +753,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS + 1;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -733,6 +781,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_WRR;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -778,6 +830,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_vs(void)
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.ams == SPDK_NVME_CC_AMS_RR);
@@ -803,6 +859,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_vs(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_WRR;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -827,6 +887,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_vs(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -853,6 +917,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_vs(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS + 1;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) != 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 0);
@@ -877,6 +945,10 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_vs(void)
 	ctrlr.opts.arb_mechanism = SPDK_NVME_CC_AMS_VS;
 
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -911,6 +983,12 @@ test_nvme_ctrlr_init_en_0_rdy_0(void)
 	SPDK_CU_ASSERT_FATAL(nvme_ctrlr_construct(&ctrlr) == 0);
 	ctrlr.cdata.nn = 1;
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
@@ -947,9 +1025,14 @@ test_nvme_ctrlr_init_en_0_rdy_1(void)
 
 	/*
 	 * Transition to CSTS.RDY = 0.
-	 * init() should set CC.EN = 1.
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 0;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+
+	/*
+	 * Transition to CC.EN = 1
+	 */
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
 	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
 	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);

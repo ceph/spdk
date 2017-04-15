@@ -207,7 +207,7 @@ ioat_create_cb(void *io_device, uint32_t priority, void *ctx_buf, void *unique_c
 	ch->ioat_dev = ioat_dev;
 	ch->ioat_ch = ioat_dev->ioat;
 	spdk_poller_register(&ch->poller, ioat_poll, ch->ioat_ch,
-			     spdk_app_get_current_core(), 0);
+			     spdk_env_get_current_core(), 0);
 	return 0;
 }
 
@@ -277,18 +277,16 @@ static int
 copy_engine_ioat_init(void)
 {
 	struct spdk_conf_section *sp = spdk_conf_find_section(NULL, "Ioat");
-	const char *val, *pci_bdf;
+	const char *pci_bdf;
 	int i;
 	struct ioat_probe_ctx probe_ctx = {};
 
 	if (sp != NULL) {
-		val = spdk_conf_section_get_val(sp, "Disable");
-		if (val != NULL) {
+		if (spdk_conf_section_get_boolval(sp, "Disable", false)) {
 			/* Disable Ioat */
-			if (!strcmp(val, "Yes")) {
-				return 0;
-			}
+			return 0;
 		}
+
 		/*Init the whitelist*/
 		for (i = 0; i < IOAT_MAX_CHANNELS; i++) {
 			pci_bdf = spdk_conf_section_get_nmval(sp, "Whitelist", i, 0);

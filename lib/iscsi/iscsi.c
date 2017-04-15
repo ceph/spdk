@@ -76,6 +76,11 @@
 
 #define MAX_TMPBUF 1024
 
+#ifdef __FreeBSD__
+#define HAVE_SRANDOMDEV 1
+#define HAVE_ARC4RANDOM 1
+#endif
+
 struct spdk_iscsi_globals g_spdk_iscsi;
 
 /* random value generation */
@@ -1442,9 +1447,16 @@ spdk_iscsi_op_login_session_normal(struct spdk_iscsi_conn *conn,
 
 	memset(conn->target_short_name, 0, MAX_TARGET_NAME);
 	target_short_name = strstr(target_name, ":");
-	if (target_short_name != NULL)
-		strncpy(conn->target_short_name, target_short_name + 1,
-			MAX_TARGET_NAME);
+	if (target_short_name != NULL) {
+		target_short_name++; /* Advance past the ':' */
+		if (strlen(target_short_name) >= MAX_TARGET_NAME) {
+			SPDK_ERRLOG("Target Short Name (%s) is more than %u characters\n",
+				    target_short_name, MAX_TARGET_NAME);
+			return rc;
+		}
+		snprintf(conn->target_short_name, MAX_TARGET_NAME, "%s",
+			 target_short_name);
+	}
 
 	pthread_mutex_lock(&g_spdk_iscsi.mutex);
 	rc = spdk_iscsi_op_login_check_target(conn, rsp_pdu, target_name,
@@ -2703,11 +2715,12 @@ spdk_iscsi_transfer_in(struct spdk_iscsi_conn *conn,
 	if (task->scsi.status != SPDK_SCSI_STATUS_GOOD) {
 		if (task != primary) {
 			conn->data_in_cnt--;
+			spdk_iscsi_conn_handle_queued_tasks(conn);
 		} else {
 			/* handle the case that it is a primary task which has subtasks */
 			if (primary->scsi.transfer_len != task->scsi.length) {
 				conn->data_in_cnt--;
-				spdk_iscsi_task_put(task);
+				spdk_iscsi_conn_handle_queued_tasks(conn);
 			}
 		}
 
@@ -2822,7 +2835,7 @@ spdk_iscsi_compare_pdu_bhs_within_existed_r2t_tasks(struct spdk_iscsi_conn *conn
 static void spdk_iscsi_queue_task(struct spdk_iscsi_conn *conn,
 				  struct spdk_iscsi_task *task)
 {
-	task->scsi.cb_event = spdk_event_allocate(spdk_app_get_current_core(), process_task_completion,
+	task->scsi.cb_event = spdk_event_allocate(spdk_env_get_current_core(), process_task_completion,
 			      conn, task);
 	spdk_trace_record(TRACE_ISCSI_TASK_QUEUE, conn->id, task->scsi.length,
 			  (uintptr_t)task, (uintptr_t)task->pdu);
@@ -2832,7 +2845,7 @@ static void spdk_iscsi_queue_task(struct spdk_iscsi_conn *conn,
 static void spdk_iscsi_queue_mgmt_task(struct spdk_iscsi_conn *conn,
 				       struct spdk_iscsi_task *task)
 {
-	task->scsi.cb_event = spdk_event_allocate(spdk_app_get_current_core(), process_task_mgmt_completion,
+	task->scsi.cb_event = spdk_event_allocate(spdk_env_get_current_core(), process_task_mgmt_completion,
 			      conn, task);
 	spdk_scsi_dev_queue_mgmt_task(conn->dev, &task->scsi);
 }
@@ -2955,6 +2968,12 @@ spdk_iscsi_op_scsi(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu)
 	task->scsi.target_port = conn->target_port;
 	task->scsi.initiator_port = conn->initiator_port;
 	task->scsi.parent = NULL;
+
+	if (task->scsi.lun == NULL) {
+		spdk_scsi_task_process_null_lun(&task->scsi);
+		process_task_completion(conn, task);
+		return 0;
+	}
 
 	/* no bi-directional support */
 	if (R_bit) {
@@ -3748,7 +3767,7 @@ spdk_iscsi_handle_status_snack(struct spdk_iscsi_conn *conn,
 
 		if (!found_pdu) {
 			SPDK_ERRLOG("Unable to find StatSN: 0x%08x. For a Status"
-				    "SNACK, assuming this is a protactic SNACK "
+				    "SNACK, assuming this is a proactive SNACK "
 				    "for an untransmitted StatSN, ignoring.\n",
 				    beg_run);
 		} else {

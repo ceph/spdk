@@ -113,12 +113,17 @@ spdk_app_get_shm_id(void)
 static void
 spdk_app_config_dump_global_section(FILE *fp)
 {
+	const char *log_facility;
+
 	if (NULL == fp)
 		return;
 
+	log_facility = spdk_get_log_facility();
+	assert(log_facility != NULL);
+
 	fprintf(fp, GLOBAL_CONFIG_TMPL,
 		spdk_app_get_core_mask(), spdk_trace_get_tpoint_group_mask(),
-		spdk_get_log_facility());
+		log_facility);
 }
 
 int
@@ -269,10 +274,6 @@ spdk_app_init(struct spdk_app_opts *opts)
 		}
 	}
 
-	if (opts->shm_id < 0) {
-		opts->shm_id = getpid();
-	}
-
 	memset(&g_spdk_app, 0, sizeof(g_spdk_app));
 	g_spdk_app.config = config;
 	g_spdk_app.shm_id = opts->shm_id;
@@ -331,7 +332,7 @@ spdk_app_init(struct spdk_app_opts *opts)
 	 *  reactor_mask will be 0x1 which will enable core 0 to run one
 	 *  reactor.
 	 */
-	if (spdk_reactors_init(opts->reactor_mask, opts->max_delay_us)) {
+	if (spdk_reactors_init(opts->max_delay_us)) {
 		fprintf(stderr, "Invalid reactor mask.\n");
 		spdk_conf_free(g_spdk_app.config);
 		exit(EXIT_FAILURE);
@@ -391,7 +392,12 @@ spdk_app_init(struct spdk_app_opts *opts)
 	sigaddset(&signew, SIGHUP);
 	pthread_sigmask(SIG_SETMASK, &signew, NULL);
 
-	snprintf(shm_name, sizeof(shm_name), "/%s_trace.%d", opts->name, opts->shm_id);
+	if (opts->shm_id >= 0) {
+		snprintf(shm_name, sizeof(shm_name), "/%s_trace.%d", opts->name, opts->shm_id);
+	} else {
+		snprintf(shm_name, sizeof(shm_name), "/%s_trace.pid%d", opts->name, (int)getpid());
+	}
+
 	spdk_trace_init(shm_name);
 
 	if (opts->tpoint_group_mask == NULL) {

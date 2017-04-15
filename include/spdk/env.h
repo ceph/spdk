@@ -156,6 +156,41 @@ void spdk_mempool_put(struct spdk_mempool *mp, void *ele);
  */
 void spdk_mempool_put_bulk(struct spdk_mempool *mp, void *const *ele_arr, size_t count);
 
+/**
+ * \brief Return the number of dedicated CPU cores utilized by
+ * 	  this env abstraction
+ */
+uint32_t spdk_env_get_core_count(void);
+
+/**
+ * \brief Return the CPU core index of the current thread. This
+ *	  will only function when called from threads set up by
+ *	  this environment abstraction.
+ */
+uint32_t spdk_env_get_current_core(void);
+
+/**
+ * \brief Return the index of the first dedicated CPU core for
+ *	  this application.
+ */
+uint32_t spdk_env_get_first_core(void);
+
+/**
+ * \brief Return the index of the next dedicated CPU core for
+ *	  this application.
+ *        If there is no next core, return UINT32_MAX.
+ */
+uint32_t spdk_env_get_next_core(uint32_t prev_core);
+
+#define SPDK_ENV_FOREACH_CORE(i)		\
+	for (i = spdk_env_get_first_core();	\
+	     i < UINT32_MAX;			\
+	     i = spdk_env_get_next_core(i))
+
+/**
+ * \brief Return the socket ID for the given core.
+ */
+uint32_t spdk_env_get_socket_id(uint32_t core);
 
 /**
  * Return true if the calling process is primary process
@@ -180,19 +215,6 @@ void spdk_delay_us(unsigned int us);
 #define SPDK_VTOPHYS_ERROR	(0xFFFFFFFFFFFFFFFFULL)
 
 uint64_t spdk_vtophys(void *buf);
-
-/**
- * Register the specified memory region for vtophys address translation.
- * The memory region must map to pinned huge pages (2MB or greater).
- */
-void spdk_vtophys_register(void *vaddr, uint64_t len);
-
-/**
- * Unregister the specified memory region from vtophys address translation.
- * The caller must ensure all in-flight DMA operations to this memory region
- *  are completed or cancelled before calling this function.
- */
-void spdk_vtophys_unregister(void *vaddr, uint64_t len);
 
 struct spdk_pci_addr {
 	uint16_t			domain;
@@ -300,6 +322,69 @@ int spdk_pci_addr_fmt(char *bdf, size_t sz, const struct spdk_pci_addr *addr);
  * \return the return value of cb()
  */
 void *spdk_call_unaffinitized(void *cb(void *arg), void *arg);
+
+/**
+ * Page-granularity memory address translation table
+ */
+struct spdk_mem_map;
+
+enum spdk_mem_map_notify_action {
+	SPDK_MEM_MAP_NOTIFY_REGISTER,
+	SPDK_MEM_MAP_NOTIFY_UNREGISTER,
+};
+
+typedef void (*spdk_mem_map_notify_cb)(void *cb_ctx, struct spdk_mem_map *map,
+				       enum spdk_mem_map_notify_action action,
+				       void *vaddr, size_t size);
+
+/**
+ * Allocate a virtual memory address translation map
+ */
+struct spdk_mem_map *spdk_mem_map_alloc(uint64_t default_translation,
+					spdk_mem_map_notify_cb notify_cb, void *cb_ctx);
+
+/**
+ * Free a memory map previously allocated by spdk_mem_map_alloc()
+ */
+void spdk_mem_map_free(struct spdk_mem_map **pmap);
+
+/**
+ * Register an address translation for a range of virtual memory.
+ *
+ * \param map Memory map
+ * \param vaddr Virtual address of the region to register - must be 2 MB aligned.
+ * \param size Size of the region - must be 2 MB in the current implementation.
+ * \param translation Translation to store in the map for this address range.
+ *
+ * \sa spdk_mem_map_clear_translation()
+ */
+void spdk_mem_map_set_translation(struct spdk_mem_map *map, uint64_t vaddr, uint64_t size,
+				  uint64_t translation);
+
+/**
+ * Unregister an address translation.
+ *
+ * \sa spdk_mem_map_set_translation()
+ */
+void spdk_mem_map_clear_translation(struct spdk_mem_map *map, uint64_t vaddr, uint64_t size);
+
+/**
+ * Look up the translation of a virtual address in a memory map.
+ */
+uint64_t spdk_mem_map_translate(const struct spdk_mem_map *map, uint64_t vaddr);
+
+/**
+ * Register the specified memory region for address translation.
+ * The memory region must map to pinned huge pages (2MB or greater).
+ */
+void spdk_mem_register(void *vaddr, size_t len);
+
+/**
+ * Unregister the specified memory region from vtophys address translation.
+ * The caller must ensure all in-flight DMA operations to this memory region
+ *  are completed or cancelled before calling this function.
+ */
+void spdk_mem_unregister(void *vaddr, size_t len);
 
 #ifdef __cplusplus
 }

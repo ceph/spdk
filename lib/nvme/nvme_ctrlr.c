@@ -82,6 +82,7 @@ spdk_nvme_ctrlr_opts_set_defaults(struct spdk_nvme_ctrlr_opts *opts)
 	opts->keep_alive_timeout_ms = 10 * 1000;
 	opts->io_queue_size = DEFAULT_IO_QUEUE_SIZE;
 	strncpy(opts->hostnqn, DEFAULT_HOSTNQN, sizeof(opts->hostnqn));
+	opts->io_queue_requests = DEFAULT_IO_QUEUE_REQUESTS;
 }
 
 /**
@@ -205,12 +206,25 @@ spdk_nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair *qpair)
 
 	ctrlr = qpair->ctrlr;
 
+	if (qpair->in_completion_context) {
+		/*
+		 * There are many cases where it is convenient to delete an io qpair in the context
+		 *  of that qpair's completion routine.  To handle this properly, set a flag here
+		 *  so that the completion routine will perform an actual delete after the context
+		 *  unwinds.
+		 */
+		qpair->delete_after_completion_context = 1;
+		return 0;
+	}
+
 	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
 
 	nvme_ctrlr_proc_remove_io_qpair(qpair);
 
 	TAILQ_REMOVE(&ctrlr->active_io_qpairs, qpair, tailq);
 	spdk_bit_array_set(ctrlr->free_io_qids, qpair->id);
+
+	spdk_free(qpair->req_buf);
 
 	if (nvme_transport_ctrlr_delete_io_qpair(ctrlr, qpair)) {
 		nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
@@ -472,8 +486,10 @@ nvme_ctrlr_state_string(enum nvme_ctrlr_state state)
 		return "disable and wait for CSTS.RDY = 1";
 	case NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0:
 		return "disable and wait for CSTS.RDY = 0";
+	case NVME_CTRLR_STATE_ENABLE:
+		return "enable controller by writing CC.EN = 1";
 	case NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1:
-		return "enable and wait for CSTS.RDY = 1";
+		return "wait for CSTS.RDY = 1";
 	case NVME_CTRLR_STATE_READY:
 		return "ready";
 	}
@@ -501,7 +517,8 @@ int
 spdk_nvme_ctrlr_reset(struct spdk_nvme_ctrlr *ctrlr)
 {
 	int rc = 0;
-	struct spdk_nvme_qpair *qpair;
+	struct spdk_nvme_qpair	*qpair;
+	struct nvme_request	*req, *tmp;
 
 	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
 
@@ -518,6 +535,13 @@ spdk_nvme_ctrlr_reset(struct spdk_nvme_ctrlr *ctrlr)
 	ctrlr->is_resetting = true;
 
 	SPDK_NOTICELOG("resetting controller\n");
+
+	/* Free all of the queued abort requests */
+	STAILQ_FOREACH_SAFE(req, &ctrlr->queued_aborts, stailq, tmp) {
+		STAILQ_REMOVE_HEAD(&ctrlr->queued_aborts, stailq);
+		nvme_free_request(req);
+		ctrlr->outstanding_aborts--;
+	}
 
 	/* Disable all queues before disabling the controller hardware. */
 	nvme_qpair_disable(ctrlr->adminq);
@@ -814,7 +838,7 @@ nvme_ctrlr_construct_and_submit_aer(struct spdk_nvme_ctrlr *ctrlr,
 	struct nvme_request *req;
 
 	aer->ctrlr = ctrlr;
-	req = nvme_allocate_request_null(nvme_ctrlr_async_event_cb, aer);
+	req = nvme_allocate_request_null(ctrlr->adminq, nvme_ctrlr_async_event_cb, aer);
 	aer->req = req;
 	if (req == NULL) {
 		return -1;
@@ -947,6 +971,12 @@ nvme_ctrlr_cleanup_process(struct spdk_nvme_ctrlr_process *proc)
 	TAILQ_FOREACH_SAFE(qpair, &proc->allocated_io_qpairs, per_process_tailq, tmp_qpair) {
 		TAILQ_REMOVE(&proc->allocated_io_qpairs, qpair, per_process_tailq);
 
+		/*
+		 * The process may have been killed while some qpairs were in their
+		 *  completion context.  Clear that flag here to allow these IO
+		 *  qpairs to be deleted.
+		 */
+		qpair->in_completion_context = 0;
 		spdk_nvme_ctrlr_free_io_qpair(qpair);
 	}
 
@@ -1150,21 +1180,10 @@ nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr)
 		} else {
 			if (csts.bits.rdy == 1) {
 				SPDK_TRACELOG(SPDK_TRACE_NVME, "CC.EN = 0 && CSTS.RDY = 1 - waiting for shutdown to complete\n");
-				/*
-				 * Controller is in the process of shutting down.
-				 * We need to wait for RDY to become 0.
-				 */
-				nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0, ready_timeout_in_ms);
-				return 0;
 			}
 
-			/*
-			 * Controller is currently disabled. We can jump straight to enabling it.
-			 */
-			SPDK_TRACELOG(SPDK_TRACE_NVME, "CC.EN = 0 && CSTS.RDY = 0 - enabling controller\n");
-			rc = nvme_ctrlr_enable(ctrlr);
-			nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1, ready_timeout_in_ms);
-			return rc;
+			nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0, ready_timeout_in_ms);
+			return 0;
 		}
 		break;
 
@@ -1186,14 +1205,23 @@ nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr)
 
 	case NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0:
 		if (csts.bits.rdy == 0) {
-			SPDK_TRACELOG(SPDK_TRACE_NVME, "CC.EN = 0 && CSTS.RDY = 0 - enabling controller\n");
-			/* CC.EN = 0 && CSTS.RDY = 0, so we can enable the controller now. */
-			SPDK_TRACELOG(SPDK_TRACE_NVME, "Setting CC.EN = 1\n");
-			rc = nvme_ctrlr_enable(ctrlr);
-			nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1, ready_timeout_in_ms);
-			return rc;
+			SPDK_TRACELOG(SPDK_TRACE_NVME, "CC.EN = 0 && CSTS.RDY = 0\n");
+			nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ENABLE, ready_timeout_in_ms);
+
+			if (ctrlr->quirks & NVME_QUIRK_DELAY_BEFORE_ENABLE) {
+				SPDK_TRACELOG(SPDK_TRACE_NVME, "Applying quirk: Delay 100us before enabling.\n");
+				ctrlr->sleep_timeout_tsc = spdk_get_ticks() + spdk_get_ticks_hz() / 10000;
+			}
+
+			return 0;
 		}
 		break;
+
+	case NVME_CTRLR_STATE_ENABLE:
+		SPDK_TRACELOG(SPDK_TRACE_NVME, "Setting CC.EN = 1\n");
+		rc = nvme_ctrlr_enable(ctrlr);
+		nvme_ctrlr_set_state(ctrlr, NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1, ready_timeout_in_ms);
+		return rc;
 
 	case NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1:
 		if (csts.bits.rdy == 1) {
@@ -1296,6 +1324,8 @@ nvme_ctrlr_construct(struct spdk_nvme_ctrlr *ctrlr)
 	ctrlr->is_failed = false;
 
 	TAILQ_INIT(&ctrlr->active_io_qpairs);
+	STAILQ_INIT(&ctrlr->queued_aborts);
+	ctrlr->outstanding_aborts = 0;
 
 	rc = nvme_robust_mutex_init_recursive_shared(&ctrlr->ctrlr_lock);
 	if (rc != 0) {
@@ -1320,8 +1350,11 @@ nvme_ctrlr_init_cap(struct spdk_nvme_ctrlr *ctrlr, const union spdk_nvme_cap_reg
 
 	ctrlr->min_page_size = 1u << (12 + ctrlr->cap.bits.mpsmin);
 
+	ctrlr->opts.io_queue_size = spdk_max(ctrlr->opts.io_queue_size, SPDK_NVME_IO_QUEUE_MIN_ENTRIES);
 	ctrlr->opts.io_queue_size = spdk_min(ctrlr->opts.io_queue_size, ctrlr->cap.bits.mqes + 1u);
 	ctrlr->opts.io_queue_size = spdk_min(ctrlr->opts.io_queue_size, max_io_queue_size);
+
+	ctrlr->opts.io_queue_requests = spdk_max(ctrlr->opts.io_queue_requests, ctrlr->opts.io_queue_size);
 }
 
 void
@@ -1374,7 +1407,7 @@ nvme_ctrlr_keep_alive(struct spdk_nvme_ctrlr *ctrlr)
 		return;
 	}
 
-	req = nvme_allocate_request_null(nvme_keep_alive_completion, NULL);
+	req = nvme_allocate_request_null(ctrlr->adminq, nvme_keep_alive_completion, NULL);
 	if (req == NULL) {
 		return;
 	}

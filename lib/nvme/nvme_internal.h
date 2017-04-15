@@ -46,7 +46,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#if defined(__i386__) || defined(__x86_64__)
 #include <x86intrin.h>
+#endif
 
 #include <sys/user.h>
 
@@ -86,6 +89,13 @@
  */
 #define NVME_INTEL_QUIRK_STRIPING 0x8
 
+/*
+ * A small delay is required before re-enabling a controller.
+ * The delay required is often vanishingly small, such that
+ * many drivers do not ever encounter the problem.
+ */
+#define NVME_QUIRK_DELAY_BEFORE_ENABLE 0x10
+
 #define NVME_MAX_ASYNC_EVENTS	(8)
 
 #define NVME_MIN_TIMEOUT_PERIOD		(5)
@@ -101,6 +111,9 @@
  */
 #define DEFAULT_MAX_IO_QUEUES		(1024)
 #define DEFAULT_IO_QUEUE_SIZE		(256)
+
+#define DEFAULT_ADMIN_QUEUE_REQUESTS	(32)
+#define DEFAULT_IO_QUEUE_REQUESTS	(512)
 
 #define DEFAULT_HOSTNQN			"nqn.2016-06.io.spdk:host"
 
@@ -176,6 +189,8 @@ struct nvme_request {
 	void				*cb_arg;
 	STAILQ_ENTRY(nvme_request)	stailq;
 
+	struct spdk_nvme_qpair		*qpair;
+
 	/**
 	 * The active admin request can be moved to a per process pending
 	 *  list based on the saved pid to tell which process it belongs
@@ -242,6 +257,7 @@ struct nvme_async_event_request {
 };
 
 struct spdk_nvme_qpair {
+	STAILQ_HEAD(, nvme_request)	free_req;
 	STAILQ_HEAD(, nvme_request)	queued_req;
 
 	enum spdk_nvme_transport_type	trtype;
@@ -250,6 +266,14 @@ struct spdk_nvme_qpair {
 
 	uint8_t				qprio;
 
+	/*
+	 * Members for handling IO qpair deletion inside of a completion context.
+	 * These are specifically defined as single bits, so that they do not
+	 *  push this data structure out to another cacheline.
+	 */
+	uint8_t				in_completion_context : 1;
+	uint8_t				delete_after_completion_context: 1;
+
 	struct spdk_nvme_ctrlr		*ctrlr;
 
 	/* List entry for spdk_nvme_ctrlr::active_io_qpairs */
@@ -257,6 +281,8 @@ struct spdk_nvme_qpair {
 
 	/* List entry for spdk_nvme_ctrlr_process::allocated_io_qpairs */
 	TAILQ_ENTRY(spdk_nvme_qpair)	per_process_tailq;
+
+	void				*req_buf;
 };
 
 struct spdk_nvme_ns {
@@ -297,6 +323,11 @@ enum nvme_ctrlr_state {
 	 * Waiting for CSTS.RDY to transition from 1 to 0 so that CC.EN may be set to 1.
 	 */
 	NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0,
+
+	/**
+	 * Enable the controller by writing CC.EN to 1
+	 */
+	NVME_CTRLR_STATE_ENABLE,
 
 	/**
 	 * Waiting for CSTS.RDY to transition from 0 to 1 after enabling the controller.
@@ -424,13 +455,15 @@ struct spdk_nvme_ctrlr {
 	spdk_nvme_timeout_cb		timeout_cb_fn;
 	void				*timeout_cb_arg;
 	uint64_t			timeout_ticks;
+
+	STAILQ_HEAD(, nvme_request)	queued_aborts;
+	uint32_t			outstanding_aborts;
 };
 
 struct nvme_driver {
 	pthread_mutex_t			lock;
 	TAILQ_HEAD(, spdk_nvme_ctrlr)	init_ctrlrs;
 	TAILQ_HEAD(, spdk_nvme_ctrlr)	attached_ctrlrs;
-	struct spdk_mempool		*request_mempool;
 	bool				initialized;
 };
 
@@ -519,7 +552,8 @@ int	nvme_ctrlr_get_cap(struct spdk_nvme_ctrlr *ctrlr, union spdk_nvme_cap_regist
 void	nvme_ctrlr_init_cap(struct spdk_nvme_ctrlr *ctrlr, const union spdk_nvme_cap_register *cap);
 int	nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 			struct spdk_nvme_ctrlr *ctrlr,
-			enum spdk_nvme_qprio qprio);
+			enum spdk_nvme_qprio qprio,
+			uint32_t num_requests);
 void	nvme_qpair_enable(struct spdk_nvme_qpair *qpair);
 void	nvme_qpair_disable(struct spdk_nvme_qpair *qpair);
 int	nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair,
@@ -529,12 +563,16 @@ int	nvme_ns_construct(struct spdk_nvme_ns *ns, uint16_t id,
 			  struct spdk_nvme_ctrlr *ctrlr);
 void	nvme_ns_destruct(struct spdk_nvme_ns *ns);
 
-struct nvme_request *nvme_allocate_request(const struct nvme_payload *payload,
+struct nvme_request *nvme_allocate_request(struct spdk_nvme_qpair *qpair,
+		const struct nvme_payload *payload,
 		uint32_t payload_size, spdk_nvme_cmd_cb cb_fn, void *cb_arg);
-struct nvme_request *nvme_allocate_request_null(spdk_nvme_cmd_cb cb_fn, void *cb_arg);
-struct nvme_request *nvme_allocate_request_contig(void *buffer, uint32_t payload_size,
+struct nvme_request *nvme_allocate_request_null(struct spdk_nvme_qpair *qpair,
 		spdk_nvme_cmd_cb cb_fn, void *cb_arg);
-struct nvme_request *nvme_allocate_request_user_copy(void *buffer, uint32_t payload_size,
+struct nvme_request *nvme_allocate_request_contig(struct spdk_nvme_qpair *qpair,
+		void *buffer, uint32_t payload_size,
+		spdk_nvme_cmd_cb cb_fn, void *cb_arg);
+struct nvme_request *nvme_allocate_request_user_copy(struct spdk_nvme_qpair *qpair,
+		void *buffer, uint32_t payload_size,
 		spdk_nvme_cmd_cb cb_fn, void *cb_arg, bool host_to_controller);
 void	nvme_free_request(struct nvme_request *req);
 void	nvme_request_remove_child(struct nvme_request *parent, struct nvme_request *child);

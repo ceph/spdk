@@ -123,8 +123,6 @@ struct spdk_reactor {
 } __attribute__((aligned(64)));
 
 static struct spdk_reactor g_reactors[RTE_MAX_LCORE];
-static uint64_t	g_reactor_mask  = 0;
-static int	g_reactor_count = 0;
 
 static enum spdk_reactor_state	g_reactor_state = SPDK_REACTOR_STATE_INVALID;
 
@@ -412,7 +410,7 @@ spdk_reactor_construct(struct spdk_reactor *reactor, uint32_t lcore, uint64_t ma
 	char	ring_name[64];
 
 	reactor->lcore = lcore;
-	reactor->socket_id = rte_lcore_to_socket_id(lcore);
+	reactor->socket_id = spdk_env_get_socket_id(lcore);
 	assert(reactor->socket_id < SPDK_MAX_SOCKET);
 	reactor->max_delay_us = max_delay_us;
 
@@ -450,13 +448,13 @@ spdk_reactor_start(struct spdk_reactor *reactor)
 int
 spdk_app_get_core_count(void)
 {
-	return g_reactor_count;
+	return spdk_env_get_core_count();
 }
 
 uint32_t
 spdk_app_get_current_core(void)
 {
-	return rte_lcore_id();
+	return spdk_env_get_current_core();
 }
 
 int
@@ -484,60 +482,30 @@ spdk_app_parse_core_mask(const char *mask, uint64_t *cpumask)
 	return 0;
 }
 
-static int
-spdk_reactor_parse_mask(const char *mask)
-{
-	int i;
-	int ret = 0;
-	uint32_t master_core = rte_get_master_lcore();
-
-	if (g_reactor_state >= SPDK_REACTOR_STATE_INITIALIZED) {
-		SPDK_ERRLOG("cannot set reactor mask after application has started\n");
-		return -1;
-	}
-
-	g_reactor_mask = 0;
-
-	if (mask == NULL) {
-		/* No mask specified so use the same mask as DPDK. */
-		RTE_LCORE_FOREACH(i) {
-			g_reactor_mask |= (1ULL << i);
-		}
-	} else {
-		ret = spdk_app_parse_core_mask(mask, &g_reactor_mask);
-		if (ret != 0) {
-			SPDK_ERRLOG("reactor mask %s specified on command line "
-				    "is invalid\n", mask);
-			return ret;
-		}
-		if (!(g_reactor_mask & (1ULL << master_core))) {
-			SPDK_ERRLOG("master_core %d must be set in core mask\n", master_core);
-			return -1;
-		}
-	}
-
-	return 0;
-}
-
 uint64_t
 spdk_app_get_core_mask(void)
 {
-	return g_reactor_mask;
+	uint32_t i;
+	uint64_t mask = 0;
+
+	SPDK_ENV_FOREACH_CORE(i) {
+		mask |= 1ULL << i;
+	}
+
+	return mask;
 }
 
 
 static uint64_t
 spdk_reactor_get_socket_mask(void)
 {
-	int i;
+	uint32_t i;
 	uint32_t socket_id;
 	uint64_t socket_info = 0;
 
-	RTE_LCORE_FOREACH(i) {
-		if (((1ULL << i) & g_reactor_mask)) {
-			socket_id = rte_lcore_to_socket_id(i);
-			socket_info |= (1ULL << socket_id);
-		}
+	SPDK_ENV_FOREACH_CORE(i) {
+		socket_id = spdk_env_get_socket_id(i);
+		socket_info |= (1ULL << socket_id);
 	}
 
 	return socket_info;
@@ -547,21 +515,22 @@ void
 spdk_reactors_start(void)
 {
 	struct spdk_reactor *reactor;
-	uint32_t i;
+	uint32_t i, current_core;
 
 	assert(rte_get_master_lcore() == rte_lcore_id());
 
 	g_reactor_state = SPDK_REACTOR_STATE_RUNNING;
 
-	RTE_LCORE_FOREACH_SLAVE(i) {
-		if (((1ULL << i) & spdk_app_get_core_mask())) {
+	current_core = spdk_env_get_current_core();
+	SPDK_ENV_FOREACH_CORE(i) {
+		if (i != current_core) {
 			reactor = spdk_reactor_get(i);
 			spdk_reactor_start(reactor);
 		}
 	}
 
 	/* Start the master reactor */
-	reactor = spdk_reactor_get(rte_get_master_lcore());
+	reactor = spdk_reactor_get(current_core);
 	spdk_reactor_start(reactor);
 
 	rte_eal_mp_wait_lcore();
@@ -575,21 +544,13 @@ void spdk_reactors_stop(void)
 }
 
 int
-spdk_reactors_init(const char *mask, unsigned int max_delay_us)
+spdk_reactors_init(unsigned int max_delay_us)
 {
 	uint32_t i, j;
-	int rc;
 	struct spdk_reactor *reactor;
 	uint64_t socket_mask = 0x0;
 	uint8_t socket_count = 0;
 	char mempool_name[32];
-
-	rc = spdk_reactor_parse_mask(mask);
-	if (rc < 0) {
-		return rc;
-	}
-
-	printf("Occupied cpu core mask is 0x%lx\n", spdk_app_get_core_mask());
 
 	socket_mask = spdk_reactor_get_socket_mask();
 	printf("Occupied cpu socket mask is 0x%lx\n", socket_mask);
@@ -598,6 +559,10 @@ spdk_reactors_init(const char *mask, unsigned int max_delay_us)
 		if ((1ULL << i) & socket_mask) {
 			socket_count++;
 		}
+	}
+	if (socket_count == 0) {
+		printf("No sockets occupied (internal error)\n");
+		return -1;
 	}
 
 	for (i = 0; i < SPDK_MAX_SOCKET; i++) {
@@ -635,17 +600,14 @@ spdk_reactors_init(const char *mask, unsigned int max_delay_us)
 		}
 	}
 
-	RTE_LCORE_FOREACH(i) {
-		if (((1ULL << i) & spdk_app_get_core_mask())) {
-			reactor = spdk_reactor_get(i);
-			spdk_reactor_construct(reactor, i, max_delay_us);
-			g_reactor_count++;
-		}
+	SPDK_ENV_FOREACH_CORE(i) {
+		reactor = spdk_reactor_get(i);
+		spdk_reactor_construct(reactor, i, max_delay_us);
 	}
 
 	g_reactor_state = SPDK_REACTOR_STATE_INITIALIZED;
 
-	return rc;
+	return 0;
 }
 
 int
@@ -655,12 +617,10 @@ spdk_reactors_fini(void)
 	uint64_t socket_mask;
 	struct spdk_reactor *reactor;
 
-	RTE_LCORE_FOREACH(i) {
-		if (((1ULL << i) & spdk_app_get_core_mask())) {
-			reactor = spdk_reactor_get(i);
-			if (reactor->events != NULL) {
-				rte_ring_free(reactor->events);
-			}
+	SPDK_ENV_FOREACH_CORE(i) {
+		reactor = spdk_reactor_get(i);
+		if (reactor->events != NULL) {
+			rte_ring_free(reactor->events);
 		}
 	}
 
@@ -722,10 +682,16 @@ spdk_poller_register(struct spdk_poller **ppoller, spdk_poller_fn fn, void *arg,
 		abort();
 	}
 
+	if (lcore >= RTE_MAX_LCORE) {
+		SPDK_ERRLOG("Attempted use lcore %u larger than max lcore %u\n",
+			    lcore, RTE_MAX_LCORE - 1);
+		abort();
+	}
+
 	*ppoller = poller;
 	reactor = spdk_reactor_get(lcore);
 
-	if (lcore == spdk_app_get_current_core()) {
+	if (lcore == spdk_env_get_current_core()) {
 		/*
 		 * The poller is registered to run on the current core, so call the add function
 		 * directly.
@@ -745,7 +711,7 @@ _spdk_poller_unregister(struct spdk_reactor *reactor, struct spdk_poller *poller
 			struct spdk_event *next)
 {
 	assert(poller->lcore == reactor->lcore);
-	assert(poller->lcore == spdk_app_get_current_core());
+	assert(poller->lcore == spdk_env_get_current_core());
 
 	poller->unregister_complete_event = next;
 
@@ -797,7 +763,7 @@ spdk_poller_unregister(struct spdk_poller **ppoller,
 
 	lcore = poller->lcore;
 
-	if (lcore == spdk_app_get_current_core()) {
+	if (lcore == spdk_env_get_current_core()) {
 		/*
 		 * The poller is registered on the current core, so call the remove function
 		 * directly.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$testdir/../../..
+rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/scripts/autotest_common.sh
 
 if [ ! -z $1 ]; then
@@ -23,6 +23,9 @@ if [ -z "$ISCSI_APP" ]; then
 fi
 
 timing_enter ext4test
+
+cp $testdir/iscsi.conf.in $testdir/iscsi.conf
+$rootdir/scripts/gen_nvme.sh >> $testdir/iscsi.conf
 
 # iSCSI target configuration
 PORT=3260
@@ -100,6 +103,7 @@ done
 
 trap - SIGINT SIGTERM EXIT
 
+rm -f $testdir/iscsi.conf
 iscsicleanup
 killprocess $pid
 timing_exit ext4test

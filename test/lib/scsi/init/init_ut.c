@@ -130,6 +130,7 @@ scsi_init_sp_null(void)
 	CU_ASSERT_EQUAL(rc, 0);
 
 	spdk_conf_set_as_default(NULL);
+
 	spdk_conf_free(config);
 }
 
@@ -151,6 +152,8 @@ scsi_init_set_max_unmap_lba_count_config_param(void)
 	params.max_unmap_lba_count = 65536;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -172,6 +175,8 @@ scsi_init_set_max_unmap_block_descriptor_count_config_param(void)
 	params.max_unmap_block_descriptor_count = 1;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -193,6 +198,8 @@ scsi_init_set_optimal_unmap_granularity_config_param(void)
 	params.optimal_unmap_granularity = 0;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -214,6 +221,8 @@ scsi_init_set_unmap_granularity_alignment_config_param(void)
 	params.unmap_granularity_alignment = 0;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -235,6 +244,8 @@ scsi_init_ugavalid_yes(void)
 	params.ugavalid = 1;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -256,11 +267,14 @@ scsi_init_ugavalid_no(void)
 	params.ugavalid = 0;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
 scsi_init_ugavalid_unknown_value_failure(void)
 {
+	struct spdk_scsi_parameters params;
 	int rc;
 	struct spdk_conf *config;
 
@@ -269,10 +283,15 @@ scsi_init_ugavalid_unknown_value_failure(void)
 	config = spdk_config_init_scsi_params("Ugavalid", "unknown value");
 	spdk_conf_set_as_default(config);
 	rc = spdk_scsi_subsystem_init();
+	CU_ASSERT_EQUAL(rc, 0);
 
-	/* returns -1 since scsi_params.ugavalid is set to
-	 * 'unknown value' */
-	CU_ASSERT_TRUE(rc < 0);
+	/* Assert the scsi_params.ugavalid == DEFAULT_UGAVALID and
+	 * assert the rest of the params are set to their default values */
+	set_default_scsi_params(&params);
+	params.ugavalid = DEFAULT_UGAVALID;
+	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -294,6 +313,8 @@ scsi_init_max_write_same_length(void)
 	params.max_write_same_length = 512;
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -314,6 +335,8 @@ scsi_init_read_config_scsi_params(void)
 	set_default_scsi_params(&params);
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 static void
@@ -335,6 +358,8 @@ scsi_init_success(void)
 	set_default_scsi_params(&params);
 	CU_ASSERT(memcmp(&g_spdk_scsi.scsi_params, &params, sizeof(params)) == 0);
 	CU_ASSERT_EQUAL(rc, 0);
+
+	spdk_conf_free(config);
 }
 
 int

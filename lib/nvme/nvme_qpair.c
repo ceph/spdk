@@ -338,26 +338,59 @@ nvme_qpair_manual_complete_request(struct spdk_nvme_qpair *qpair,
 int32_t
 spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_completions)
 {
+	int32_t ret;
+
 	if (qpair->ctrlr->is_failed) {
 		nvme_qpair_fail(qpair);
 		return 0;
 	}
 
-	return nvme_transport_qpair_process_completions(qpair, max_completions);
+	qpair->in_completion_context = 1;
+	ret = nvme_transport_qpair_process_completions(qpair, max_completions);
+	qpair->in_completion_context = 0;
+	if (qpair->delete_after_completion_context) {
+		/*
+		 * A request to delete this qpair was made in the context of this completion
+		 *  routine - so it is safe to delete it now.
+		 */
+		spdk_nvme_ctrlr_free_io_qpair(qpair);
+	}
+	return ret;
 }
 
 int
 nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 		struct spdk_nvme_ctrlr *ctrlr,
-		enum spdk_nvme_qprio qprio)
+		enum spdk_nvme_qprio qprio,
+		uint32_t num_requests)
 {
+	size_t req_size_padded;
+	uint32_t i;
+
 	qpair->id = id;
 	qpair->qprio = qprio;
+
+	qpair->in_completion_context = 0;
+	qpair->delete_after_completion_context = 0;
 
 	qpair->ctrlr = ctrlr;
 	qpair->trtype = ctrlr->trid.trtype;
 
+	STAILQ_INIT(&qpair->free_req);
 	STAILQ_INIT(&qpair->queued_req);
+
+	req_size_padded = (sizeof(struct nvme_request) + 63) & ~(size_t)63;
+
+	qpair->req_buf = spdk_zmalloc(req_size_padded * num_requests, 64, NULL);
+	if (qpair->req_buf == NULL) {
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < num_requests; i++) {
+		struct nvme_request *req = qpair->req_buf + i * req_size_padded;
+
+		STAILQ_INSERT_HEAD(&qpair->free_req, req, stailq);
+	}
 
 	return 0;
 }

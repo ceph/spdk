@@ -218,6 +218,18 @@ struct spdk_scsi_lun {
 	/** Name for this LUN. */
 	char name[SPDK_SCSI_LUN_MAX_NAME_LENGTH];
 
+	/** Poller to release the resource of the lun when it is hot removed */
+	struct spdk_poller *hotplug_poller;
+
+	/** The core hotplug_poller is assigned */
+	uint32_t			lcore;
+
+	/** The LUN is removed */
+	bool				removed;
+
+	/** The LUN is clamed */
+	bool claimed;
+
 	TAILQ_HEAD(tasks, spdk_scsi_task) tasks;			/* submitted tasks */
 	TAILQ_HEAD(pending_tasks, spdk_scsi_task) pending_tasks;	/* pending tasks */
 };
@@ -293,6 +305,7 @@ void spdk_scsi_task_build_sense_data(struct spdk_scsi_task *task, int sk, int as
 				     int ascq);
 void spdk_scsi_task_set_status(struct spdk_scsi_task *task, int sc, int sk, int asc,
 			       int ascq);
+void spdk_scsi_task_process_null_lun(struct spdk_scsi_task *task);
 
 static inline struct spdk_scsi_task *
 spdk_scsi_task_get_primary(struct spdk_scsi_task *task)

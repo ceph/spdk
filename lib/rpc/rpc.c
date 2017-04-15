@@ -83,23 +83,13 @@ static int
 enable_rpc(void)
 {
 	struct spdk_conf_section	*sp;
-	char				*val;
 
 	sp = spdk_conf_find_section(NULL, "Rpc");
 	if (sp == NULL) {
 		return 0;
 	}
 
-	val = spdk_conf_section_get_val(sp, "Enable");
-	if (val == NULL) {
-		return 0;
-	}
-
-	if (!strcmp(val, "Yes")) {
-		return 1;
-	}
-
-	return 0;
+	return spdk_conf_section_get_boolval(sp, "Enable", false);
 }
 
 static const char *
@@ -244,7 +234,7 @@ spdk_rpc_setup(void *arg)
 	}
 
 	/* Register the periodic rpc_server_do_work */
-	spdk_poller_register(&g_rpc_poller, spdk_rpc_server_do_work, NULL, spdk_app_get_current_core(),
+	spdk_poller_register(&g_rpc_poller, spdk_rpc_server_do_work, NULL, spdk_env_get_current_core(),
 			     RPC_SELECT_INTERVAL);
 }
 
@@ -257,31 +247,24 @@ spdk_rpc_initialize(void)
 	 *  when the SPDK application has finished initialization and ready for logins
 	 *  or RPC commands.
 	 */
-	spdk_poller_register(&g_rpc_poller, spdk_rpc_setup, NULL, spdk_app_get_current_core(), 0);
+	spdk_poller_register(&g_rpc_poller, spdk_rpc_setup, NULL, spdk_env_get_current_core(), 0);
 	return 0;
-}
-
-static void
-spdk_rpc_finish_cleanup(void *arg1, void *arg2)
-{
-	if (g_jsonrpc_server) {
-		spdk_jsonrpc_server_shutdown(g_jsonrpc_server);
-	}
 }
 
 static int
 spdk_rpc_finish(void)
 {
-	struct spdk_event *complete;
-
 	if (g_rpc_listen_addr_unix.sun_path[0]) {
 		/* Delete the Unix socket file */
 		unlink(g_rpc_listen_addr_unix.sun_path);
 	}
 
-	complete = spdk_event_allocate(spdk_app_get_current_core(), spdk_rpc_finish_cleanup,
-				       NULL, NULL);
-	spdk_poller_unregister(&g_rpc_poller, complete);
+	spdk_poller_unregister(&g_rpc_poller, NULL);
+
+	if (g_jsonrpc_server) {
+		spdk_jsonrpc_server_shutdown(g_jsonrpc_server);
+	}
+
 	return 0;
 }
 

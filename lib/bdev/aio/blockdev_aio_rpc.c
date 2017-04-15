@@ -33,20 +33,24 @@
 
 #include "blockdev_aio.h"
 #include "spdk/rpc.h"
+#include "spdk/util.h"
 
 #include "spdk_internal/log.h"
 
 struct rpc_construct_aio {
+	char *name;
 	char *fname;
 };
 
 static void
 free_rpc_construct_aio(struct rpc_construct_aio *req)
 {
+	free(req->name);
 	free(req->fname);
 }
 
 static const struct spdk_json_object_decoder rpc_construct_aio_decoders[] = {
+	{"name", offsetof(struct rpc_construct_aio, name), spdk_json_decode_string},
 	{"fname", offsetof(struct rpc_construct_aio, fname), spdk_json_decode_string},
 };
 
@@ -60,13 +64,13 @@ spdk_rpc_construct_aio_bdev(struct spdk_jsonrpc_server_conn *conn,
 	struct spdk_bdev *bdev;
 
 	if (spdk_json_decode_object(params, rpc_construct_aio_decoders,
-				    sizeof(rpc_construct_aio_decoders) / sizeof(*rpc_construct_aio_decoders),
+				    SPDK_COUNTOF(rpc_construct_aio_decoders),
 				    &req)) {
 		SPDK_ERRLOG("spdk_json_decode_object failed\n");
 		goto invalid;
 	}
 
-	bdev = create_aio_disk(req.fname);
+	bdev = create_aio_disk(req.name, req.fname);
 	if (bdev == NULL) {
 		goto invalid;
 	}

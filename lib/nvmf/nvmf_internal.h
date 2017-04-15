@@ -55,6 +55,8 @@ struct spdk_nvmf_tgt {
 	TAILQ_HEAD(, spdk_nvmf_subsystem)	subsystems;
 	struct spdk_nvmf_discovery_log_page	*discovery_log_page;
 	size_t					discovery_log_page_size;
+	TAILQ_HEAD(, spdk_nvmf_listen_addr)	listen_addrs;
+	uint32_t				current_subsystem_id;
 };
 
 extern struct spdk_nvmf_tgt g_nvmf_tgt;

@@ -24,3 +24,7 @@ which avoids kernel context switches and eliminates interrupt handling overhead.
 - @ref nvmf
 - @ref ioat
 - @ref iscsi
+- @ref bdev
+- @ref blob
+- @ref blobfs
+- @ref vhost

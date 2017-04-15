@@ -43,6 +43,7 @@
 
 #include "spdk/trace.h"
 #include "spdk/nvme_spec.h"
+#include "spdk/util.h"
 
 #include "spdk_internal/log.h"
 
@@ -527,7 +528,7 @@ find_prop(uint32_t ofst)
 {
 	size_t i;
 
-	for (i = 0; i < sizeof(nvmf_props) / sizeof(*nvmf_props); i++) {
+	for (i = 0; i < SPDK_COUNTOF(nvmf_props); i++) {
 		const struct nvmf_prop *prop = &nvmf_props[i];
 
 		if (prop->ofst == ofst) {
@@ -618,11 +619,31 @@ int
 spdk_nvmf_session_poll(struct spdk_nvmf_session *session)
 {
 	struct spdk_nvmf_conn	*conn, *tmp;
+	struct spdk_nvmf_subsystem 	*subsys = session->subsys;
+
+	if (subsys->is_removed && subsys->mode == NVMF_SUBSYSTEM_MODE_VIRTUAL) {
+		if (session->aer_req) {
+			struct spdk_nvmf_request *aer = session->aer_req;
+
+			aer->rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
+			aer->rsp->nvme_cpl.status.sc = SPDK_NVME_SC_ABORTED_SQ_DELETION;
+			aer->rsp->nvme_cpl.status.dnr = 0;
+			spdk_nvmf_request_complete(aer);
+			session->aer_req = NULL;
+		}
+	}
 
 	TAILQ_FOREACH_SAFE(conn, &session->connections, link, tmp) {
 		if (conn->transport->conn_poll(conn) < 0) {
 			SPDK_ERRLOG("Transport poll failed for conn %p; closing connection\n", conn);
 			spdk_nvmf_session_disconnect(conn);
+		}
+		if (subsys->subtype == SPDK_NVMF_SUBTYPE_NVME) {
+			if (subsys->is_removed && conn->transport->conn_is_idle(conn)) {
+				if (subsys->ops->detach) {
+					subsys->ops->detach(subsys);
+				}
+			}
 		}
 	}
 
@@ -762,4 +783,24 @@ spdk_nvmf_session_get_features_async_event_configuration(struct spdk_nvmf_reques
 	SPDK_TRACELOG(SPDK_TRACE_NVMF, "Get Features - Async Event Configuration\n");
 	rsp->cdw0 = session->async_event_config.raw;
 	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+}
+
+int
+spdk_nvmf_session_async_event_request(struct spdk_nvmf_request *req)
+{
+	struct spdk_nvmf_session *session = req->conn->sess;
+	struct spdk_nvme_cpl *rsp = &req->rsp->nvme_cpl;
+
+	SPDK_TRACELOG(SPDK_TRACE_NVMF, "Async Event Request\n");
+
+	assert(session->vcdata.aerl + 1 == 1);
+	if (session->aer_req != NULL) {
+		SPDK_TRACELOG(SPDK_TRACE_NVMF, "AERL exceeded\n");
+		rsp->status.sct = SPDK_NVME_SCT_COMMAND_SPECIFIC;
+		rsp->status.sc = SPDK_NVME_SC_ASYNC_EVENT_REQUEST_LIMIT_EXCEEDED;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
+	session->aer_req = req;
+	return SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS;
 }

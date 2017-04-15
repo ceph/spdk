@@ -3,12 +3,15 @@
 set -e
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$testdir/../../..
+rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/scripts/autotest_common.sh
 
 testdir=$(readlink -f $(dirname $0))
 
 timing_enter blockdev
+
+cp $testdir/bdev.conf.in $testdir/bdev.conf
+$rootdir/scripts/gen_nvme.sh >> $testdir/bdev.conf
 
 timing_enter bounds
 $testdir/bdevio/bdevio $testdir/bdev.conf
@@ -34,4 +37,5 @@ if [ $RUN_NIGHTLY -eq 1 ]; then
 	timing_exit unmap
 fi
 
+rm -f $testdir/bdev.conf
 timing_exit blockdev

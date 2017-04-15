@@ -42,11 +42,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#include <rte_config.h>
-#include <rte_lcore.h>
-
 #include "spdk/nvme.h"
 #include "spdk/env.h"
+#include "spdk/util.h"
 
 #define MAX_DEVS 64
 
@@ -228,6 +226,7 @@ display_namespace(struct spdk_nvme_ns *ns)
 static void
 display_controller(struct dev *dev, int model)
 {
+	struct spdk_nvme_ns			*ns;
 	const struct spdk_nvme_ctrlr_data	*cdata;
 	uint8_t					str[128];
 	uint32_t				i;
@@ -272,7 +271,11 @@ display_controller(struct dev *dev, int model)
 	printf("Namespace Attributes\n");
 	printf("============================\n");
 	for (i = 1; i <= spdk_nvme_ctrlr_get_num_ns(dev->ctrlr); i++) {
-		display_namespace(spdk_nvme_ctrlr_get_ns(dev->ctrlr, i));
+		ns = spdk_nvme_ctrlr_get_ns(dev->ctrlr, i);
+		if (ns == NULL) {
+			continue;
+		}
+		display_namespace(ns);
 	}
 }
 
@@ -386,7 +389,7 @@ get_allocated_nsid(struct dev *dev)
 	}
 
 	printf("Allocated Namespace IDs:\n");
-	for (i = 0; i < sizeof(ns_list->ns_list) / sizeof(*ns_list->ns_list); i++) {
+	for (i = 0; i < SPDK_COUNTOF(ns_list->ns_list); i++) {
 		if (ns_list->ns_list[i] == 0) {
 			break;
 		}
@@ -780,7 +783,6 @@ update_firmware_image(void)
 		while (getchar() != '\n');
 		return;
 	}
-	path[strlen(path) - 1] = '\0';
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0) {

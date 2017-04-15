@@ -119,7 +119,8 @@ struct nvme_tracker {
 	struct nvme_request		*req;
 	uint16_t			cid;
 
-	uint16_t			rsvd1: 15;
+	uint16_t			rsvd1: 14;
+	uint16_t			timed_out: 1;
 	uint16_t			active: 1;
 
 	uint32_t			rsvd2;
@@ -273,7 +274,9 @@ _nvme_pcie_hotplug_monitor(void *cb_ctx, spdk_nvme_probe_cb probe_cb,
 
 				/* get the user app to clean up and stop I/O */
 				if (remove_cb) {
+					nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 					remove_cb(cb_ctx, ctrlr);
+					nvme_robust_mutex_lock(&g_spdk_nvme_driver->lock);
 				}
 			}
 		}
@@ -570,7 +573,8 @@ nvme_pcie_ctrlr_construct_admin_qpair(struct spdk_nvme_ctrlr *ctrlr)
 	rc = nvme_qpair_init(ctrlr->adminq,
 			     0, /* qpair ID */
 			     ctrlr,
-			     SPDK_NVME_QPRIO_URGENT);
+			     SPDK_NVME_QPRIO_URGENT,
+			     NVME_ADMIN_ENTRIES);
 	if (rc != 0) {
 		return rc;
 	}
@@ -638,13 +642,17 @@ nvme_pcie_ctrlr_scan(const struct spdk_nvme_transport_id *trid,
 	if (hotplug_fd < 0) {
 		hotplug_fd = spdk_uevent_connect();
 		if (hotplug_fd < 0) {
-			SPDK_ERRLOG("Failed to open uevent netlink socket\n");
+			SPDK_TRACELOG(SPDK_TRACE_NVME, "Failed to open uevent netlink socket\n");
 		}
 	} else {
 		_nvme_pcie_hotplug_monitor(cb_ctx, probe_cb, remove_cb);
 	}
 
-	return spdk_pci_nvme_enumerate(pcie_nvme_enum_cb, &enum_ctx);
+	if (enum_ctx.has_pci_addr == false) {
+		return spdk_pci_nvme_enumerate(pcie_nvme_enum_cb, &enum_ctx);
+	} else {
+		return spdk_pci_nvme_device_attach(pcie_nvme_enum_cb, &enum_ctx, &enum_ctx.pci_addr);
+	}
 }
 
 static int
@@ -1014,6 +1022,7 @@ nvme_pcie_qpair_submit_tracker(struct spdk_nvme_qpair *qpair, struct nvme_tracke
 	struct nvme_pcie_ctrlr	*pctrlr = nvme_pcie_ctrlr(qpair->ctrlr);
 
 	tr->submit_tick = spdk_get_ticks();
+	tr->timed_out = 0;
 
 	req = tr->req;
 	pqpair->tr[tr->cid].active = true;
@@ -1253,7 +1262,7 @@ nvme_pcie_ctrlr_cmd_create_io_cq(struct spdk_nvme_ctrlr *ctrlr,
 	struct nvme_request *req;
 	struct spdk_nvme_cmd *cmd;
 
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(ctrlr->adminq, cb_fn, cb_arg);
 	if (req == NULL) {
 		return -ENOMEM;
 	}
@@ -1284,7 +1293,7 @@ nvme_pcie_ctrlr_cmd_create_io_sq(struct spdk_nvme_ctrlr *ctrlr,
 	struct nvme_request *req;
 	struct spdk_nvme_cmd *cmd;
 
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(ctrlr->adminq, cb_fn, cb_arg);
 	if (req == NULL) {
 		return -ENOMEM;
 	}
@@ -1311,7 +1320,7 @@ nvme_pcie_ctrlr_cmd_delete_io_cq(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme
 	struct nvme_request *req;
 	struct spdk_nvme_cmd *cmd;
 
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(ctrlr->adminq, cb_fn, cb_arg);
 	if (req == NULL) {
 		return -ENOMEM;
 	}
@@ -1330,7 +1339,7 @@ nvme_pcie_ctrlr_cmd_delete_io_sq(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme
 	struct nvme_request *req;
 	struct spdk_nvme_cmd *cmd;
 
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(ctrlr->adminq, cb_fn, cb_arg);
 	if (req == NULL) {
 		return -ENOMEM;
 	}
@@ -1410,7 +1419,7 @@ nvme_pcie_ctrlr_create_io_qpair(struct spdk_nvme_ctrlr *ctrlr, uint16_t qid,
 
 	qpair = &pqpair->qpair;
 
-	rc = nvme_qpair_init(qpair, qid, ctrlr, qprio);
+	rc = nvme_qpair_init(qpair, qid, ctrlr, qprio, ctrlr->opts.io_queue_requests);
 	if (rc != 0) {
 		nvme_pcie_qpair_destroy(qpair);
 		return NULL;
@@ -1772,7 +1781,7 @@ nvme_pcie_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_reques
 	}
 
 	TAILQ_REMOVE(&pqpair->free_tr, tr, tq_list); /* remove tr from free_tr */
-	TAILQ_INSERT_HEAD(&pqpair->outstanding_tr, tr, tq_list);
+	TAILQ_INSERT_TAIL(&pqpair->outstanding_tr, tr, tq_list);
 	tr->req = req;
 	req->cmd.cid = tr->cid;
 
@@ -1811,36 +1820,37 @@ static void
 nvme_pcie_qpair_check_timeout(struct spdk_nvme_qpair *qpair)
 {
 	uint64_t t02;
-	struct nvme_tracker *tr;
+	struct nvme_tracker *tr, *tmp;
 	struct nvme_pcie_qpair *pqpair = nvme_pcie_qpair(qpair);
 	struct spdk_nvme_ctrlr *ctrlr = qpair->ctrlr;
 
-	if (TAILQ_EMPTY(&pqpair->outstanding_tr)) {
-		return;
-	}
-
-	/*
-	 * qpair could be either for normal i/o or for admin command. If qpair is admin
-	 * and request is SPDK_NVME_OPC_ASYNC_EVENT_REQUEST, skip to next previous.
+	/* We don't want to expose the admin queue to the user,
+	 * so when we're timing out admin commands set the
+	 * qpair to NULL.
 	 */
-	tr = TAILQ_LAST(&pqpair->outstanding_tr, nvme_outstanding_tr_head);
-	while (tr->req->cmd.opc == SPDK_NVME_OPC_ASYNC_EVENT_REQUEST) {
-		/* qpair is for admin request */
-		tr = TAILQ_PREV(tr, nvme_outstanding_tr_head, tq_list);
-		if (!tr) {
-			/*
-			 * All request were AER
-			 */
-			return;
-		}
+	if (qpair == ctrlr->adminq) {
+		qpair = NULL;
 	}
 
 	t02 = spdk_get_ticks();
-	if (tr->submit_tick + ctrlr->timeout_ticks <= t02) {
-		/*
-		 * Request has timed out. This could be i/o or admin request.
-		 * Call the registered timeout function for user to take action.
-		 */
+	TAILQ_FOREACH_SAFE(tr, &pqpair->outstanding_tr, tq_list, tmp) {
+		if (tr->timed_out) {
+			continue;
+		}
+
+		if (qpair == NULL &&
+		    tr->req->cmd.opc == SPDK_NVME_OPC_ASYNC_EVENT_REQUEST) {
+			continue;
+		}
+
+		if (tr->submit_tick + ctrlr->timeout_ticks > t02) {
+			/* The trackers are in order, so as soon as one has not timed out,
+			 * stop iterating.
+			 */
+			break;
+		}
+
+		tr->timed_out = 1;
 		ctrlr->timeout_cb_fn(ctrlr->timeout_cb_arg, ctrlr, qpair, tr->cid);
 	}
 }

@@ -38,6 +38,7 @@
 
 #include <sys/types.h>
 
+#include "spdk/env.h"
 #include "spdk/event.h"
 #include "spdk/log.h"
 #include "spdk/net.h"
@@ -94,7 +95,7 @@ spdk_acceptor(void *arg)
 void
 spdk_iscsi_acceptor_start(void)
 {
-	spdk_poller_register(&g_acceptor_poller, spdk_acceptor, &g_spdk_iscsi, spdk_app_get_current_core(),
+	spdk_poller_register(&g_acceptor_poller, spdk_acceptor, &g_spdk_iscsi, spdk_env_get_current_core(),
 			     ACCEPT_TIMEOUT_US);
 }
 

@@ -34,7 +34,7 @@
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
 
-C_SRCS = $(TEST_FILE)
+C_SRCS = $(TEST_FILE) $(OTHER_FILES)
 
 CFLAGS += -I$(SPDK_ROOT_DIR)/lib/nvmf
 CFLAGS += -I$(SPDK_ROOT_DIR)/test
@@ -52,5 +52,8 @@ $(APP) : $(OBJS) $(SPDK_LIB_FILES)
 
 clean:
 	$(CLEAN_C) $(APP)
+
+%.o: $(SPDK_ROOT_DIR)/lib/nvmf/%.c %.d $(MAKEFILE_LIST)
+	$(COMPILE_C)
 
 include $(SPDK_ROOT_DIR)/mk/spdk.deps.mk

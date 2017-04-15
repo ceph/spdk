@@ -87,11 +87,6 @@ spdk_pci_device_detach(struct spdk_pci_device *device)
 	rte_eal_device_remove(&device->device);
 #endif
 	rte_eal_pci_detach(&addr);
-	/* This will not actually load any drivers because our
-	 * callback isn't set, but it will re-add the device
-	 * to DPDK's internal list.
-	 */
-	rte_eal_pci_probe_one(&addr);
 }
 
 int
@@ -107,6 +102,11 @@ spdk_pci_device_attach(struct spdk_pci_enum_ctx *ctx,
 	addr.function = pci_address->func;
 
 	pthread_mutex_lock(&ctx->mtx);
+
+	if (!ctx->is_registered) {
+		ctx->is_registered = true;
+		rte_eal_pci_register(&ctx->driver);
+	}
 
 	ctx->cb_fn = enum_cb;
 	ctx->cb_arg = enum_ctx;
@@ -135,6 +135,11 @@ spdk_pci_enumerate(struct spdk_pci_enum_ctx *ctx,
 		   void *enum_ctx)
 {
 	pthread_mutex_lock(&ctx->mtx);
+
+	if (!ctx->is_registered) {
+		ctx->is_registered = true;
+		rte_eal_pci_register(&ctx->driver);
+	}
 
 	ctx->cb_fn = enum_cb;
 	ctx->cb_arg = enum_ctx;
@@ -332,7 +337,7 @@ spdk_pci_device_get_serial_number(struct spdk_pci_device *dev, char *sn, size_t 
 					if (err)
 						return -1;
 				}
-				sprintf(sn, "%08x%08x", buf[1], buf[0]);
+				snprintf(sn, len, "%08x%08x", buf[1], buf[0]);
 				return 0;
 			}
 		}
@@ -399,7 +404,8 @@ spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
 		.l_len = 0,
 	};
 
-	sprintf(shm_name, PCI_PRI_FMT, pci_addr->domain, pci_addr->bus, pci_addr->dev, pci_addr->func);
+	snprintf(shm_name, sizeof(shm_name), PCI_PRI_FMT, pci_addr->domain, pci_addr->bus, pci_addr->dev,
+		 pci_addr->func);
 
 	dev_fd = shm_open(shm_name, O_RDWR | O_CREAT, 0600);
 	if (dev_fd == -1) {

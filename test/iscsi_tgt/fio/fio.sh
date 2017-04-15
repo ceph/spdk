@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$testdir/../../..
+rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/scripts/autotest_common.sh
 
 function running_config() {
@@ -37,6 +37,9 @@ if [ -z "$INITIATOR_IP" ]; then
 fi
 
 timing_enter fio
+
+cp $testdir/iscsi.conf.in $testdir/iscsi.conf
+$rootdir/scripts/gen_nvme.sh >> $testdir/iscsi.conf
 
 # iSCSI target configuration
 PORT=3260
@@ -92,5 +95,6 @@ rm -f ./local-job0-0-verify.state
 trap - SIGINT SIGTERM EXIT
 
 iscsicleanup
+rm -f $testdir/iscsi.conf
 killprocess $pid
 timing_exit fio

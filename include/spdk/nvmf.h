@@ -85,6 +85,11 @@ struct spdk_nvmf_host {
 
 struct spdk_nvmf_ctrlr_ops {
 	/**
+	 * Initialize the controller.
+	 */
+	int (*attach)(struct spdk_nvmf_subsystem *subsystem);
+
+	/**
 	 * Get NVMe identify controller data.
 	 */
 	void (*ctrlr_get_data)(struct spdk_nvmf_session *session);
@@ -110,22 +115,30 @@ struct spdk_nvmf_ctrlr_ops {
 	void (*detach)(struct spdk_nvmf_subsystem *subsystem);
 };
 
+struct spdk_nvmf_subsystem_allowed_listener {
+	struct spdk_nvmf_listen_addr				*listen_addr;
+	TAILQ_ENTRY(spdk_nvmf_subsystem_allowed_listener)	link;
+};
+
 /*
  * The NVMf subsystem, as indicated in the specification, is a collection
  * of virtual controller sessions.  Any individual controller session has
  * access to all the NVMe device/namespaces maintained by the subsystem.
  */
 struct spdk_nvmf_subsystem {
+	uint32_t id;
 	uint32_t lcore;
 	char subnqn[SPDK_NVMF_NQN_MAX_LEN];
 	enum spdk_nvmf_subsystem_mode mode;
 	enum spdk_nvmf_subtype subtype;
-
+	bool is_removed;
 	union {
 		struct {
-			struct spdk_nvme_ctrlr *ctrlr;
-			struct spdk_nvme_qpair *io_qpair;
-			struct spdk_pci_addr pci_addr;
+			struct spdk_nvme_ctrlr	*ctrlr;
+			struct spdk_nvme_qpair	*io_qpair;
+			struct spdk_pci_addr	pci_addr;
+			struct spdk_poller	*admin_poller;
+			int32_t			outstanding_admin_cmd_count;
 		} direct;
 
 		struct {
@@ -144,13 +157,12 @@ struct spdk_nvmf_subsystem {
 
 	TAILQ_HEAD(, spdk_nvmf_session)		sessions;
 
-	TAILQ_HEAD(, spdk_nvmf_listen_addr)	listen_addrs;
-	uint32_t				num_listen_addrs;
-
 	TAILQ_HEAD(, spdk_nvmf_host)		hosts;
 	uint32_t				num_hosts;
 
-	TAILQ_ENTRY(spdk_nvmf_subsystem) entries;
+	TAILQ_HEAD(, spdk_nvmf_subsystem_allowed_listener)	allowed_listeners;
+
+	TAILQ_ENTRY(spdk_nvmf_subsystem)	entries;
 };
 
 struct spdk_nvmf_subsystem *spdk_nvmf_create_subsystem(const char *nqn,
@@ -159,6 +171,13 @@ struct spdk_nvmf_subsystem *spdk_nvmf_create_subsystem(const char *nqn,
 		void *cb_ctx,
 		spdk_nvmf_subsystem_connect_fn connect_cb,
 		spdk_nvmf_subsystem_disconnect_fn disconnect_cb);
+
+/**
+ * Initialize the subsystem on the thread that will be used to poll it.
+ *
+ * \param subsystem Subsystem that will be polled on this core.
+ */
+int spdk_nvmf_subsystem_start(struct spdk_nvmf_subsystem *subsystem);
 
 void spdk_nvmf_delete_subsystem(struct spdk_nvmf_subsystem *subsystem);
 
@@ -169,9 +188,16 @@ bool spdk_nvmf_subsystem_exists(const char *subnqn);
 
 bool spdk_nvmf_subsystem_host_allowed(struct spdk_nvmf_subsystem *subsystem, const char *hostnqn);
 
+struct spdk_nvmf_listen_addr *
+spdk_nvmf_tgt_listen(const char *trname, const char *traddr, const char *trsvcid);
+
 int
 spdk_nvmf_subsystem_add_listener(struct spdk_nvmf_subsystem *subsystem,
-				 const char *trname, const char *traddr, const char *trsvcid);
+				 struct spdk_nvmf_listen_addr *listen_addr);
+
+bool
+spdk_nvmf_subsystem_listener_allowed(struct spdk_nvmf_subsystem *subsystem,
+				     struct spdk_nvmf_listen_addr *listen_addr);
 
 int
 spdk_nvmf_subsystem_add_host(struct spdk_nvmf_subsystem *subsystem,

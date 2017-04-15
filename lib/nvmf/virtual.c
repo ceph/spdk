@@ -40,11 +40,13 @@
 
 #include "spdk/bdev.h"
 #include "spdk/endian.h"
+#include "spdk/io_channel.h"
 #include "spdk/nvme.h"
 #include "spdk/nvmf_spec.h"
 #include "spdk/trace.h"
 #include "spdk/scsi_spec.h"
 #include "spdk/string.h"
+#include "spdk/util.h"
 
 #include "spdk_internal/log.h"
 
@@ -229,7 +231,7 @@ identify_active_ns_list(struct spdk_nvmf_subsystem *subsystem,
 			continue;
 		}
 		ns_list->ns_list[count++] = i;
-		if (count == sizeof(*ns_list) / sizeof(uint32_t)) {
+		if (count == SPDK_COUNTOF(ns_list->ns_list)) {
 			break;
 		}
 	}
@@ -339,10 +341,7 @@ nvmf_virtual_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req)
 	case SPDK_NVME_OPC_SET_FEATURES:
 		return nvmf_virtual_ctrlr_set_features(req);
 	case SPDK_NVME_OPC_ASYNC_EVENT_REQUEST:
-		SPDK_TRACELOG(SPDK_TRACE_NVMF, "Async Event Request\n");
-		/* TODO: Just release the request as consumed. AER events will never
-		 * be triggered. */
-		return SPDK_NVMF_REQUEST_EXEC_STATUS_RELEASE;
+		return spdk_nvmf_session_async_event_request(req);
 	case SPDK_NVME_OPC_KEEP_ALIVE:
 		SPDK_TRACELOG(SPDK_TRACE_NVMF, "Keep Alive\n");
 		/*
@@ -522,17 +521,44 @@ nvmf_virtual_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 	}
 }
 
+static int
+nvmf_virtual_ctrlr_attach(struct spdk_nvmf_subsystem *subsystem)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_io_channel *ch;
+	uint32_t i;
+
+	for (i = 0; i < subsystem->dev.virt.ns_count; i++) {
+		bdev = subsystem->dev.virt.ns_list[i];
+		ch = spdk_bdev_get_io_channel(bdev, SPDK_IO_PRIORITY_DEFAULT);
+		if (ch == NULL) {
+			SPDK_ERRLOG("io_channel allocation failed\n");
+			return -1;
+		}
+		subsystem->dev.virt.ch[i] = ch;
+	}
+
+	return 0;
+}
+
 static void
 nvmf_virtual_ctrlr_detach(struct spdk_nvmf_subsystem *subsystem)
 {
 	uint32_t i;
 
 	for (i = 0; i < subsystem->dev.virt.ns_count; i++) {
-		spdk_bdev_unclaim(subsystem->dev.virt.ns_list[i]);
+		if (subsystem->dev.virt.ns_list[i]) {
+			spdk_put_io_channel(subsystem->dev.virt.ch[i]);
+			spdk_bdev_unclaim(subsystem->dev.virt.ns_list[i]);
+			subsystem->dev.virt.ch[i] = NULL;
+			subsystem->dev.virt.ns_list[i] = NULL;
+		}
 	}
+	subsystem->dev.virt.ns_count = 0;
 }
 
 const struct spdk_nvmf_ctrlr_ops spdk_nvmf_virtual_ctrlr_ops = {
+	.attach				= nvmf_virtual_ctrlr_attach,
 	.ctrlr_get_data			= nvmf_virtual_ctrlr_get_data,
 	.process_admin_cmd		= nvmf_virtual_ctrlr_process_admin_cmd,
 	.process_io_cmd			= nvmf_virtual_ctrlr_process_io_cmd,

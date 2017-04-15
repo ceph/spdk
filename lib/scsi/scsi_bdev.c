@@ -247,7 +247,7 @@ spdk_bdev_scsi_inquiry(struct spdk_bdev *bdev, struct spdk_scsi_task *task,
 			len += sizeof(struct spdk_scsi_desig_desc) + 4;
 			len += sizeof(struct spdk_scsi_desig_desc) + 4;
 			len += sizeof(struct spdk_scsi_desig_desc) + 4;
-			if (sizeof(struct spdk_scsi_vpd_page) + len > task->alloc_len) {
+			if (sizeof(struct spdk_scsi_vpd_page) + len > alloc_len) {
 				spdk_scsi_task_set_status(task, SPDK_SCSI_STATUS_CHECK_CONDITION,
 							  SPDK_SCSI_SENSE_ILLEGAL_REQUEST,
 							  SPDK_SCSI_ASC_INVALID_FIELD_IN_CDB,
@@ -362,14 +362,6 @@ spdk_bdev_scsi_inquiry(struct spdk_bdev *bdev, struct spdk_scsi_task *task,
 			to_be16(&desig->desig[2], dev->id);
 			len += sizeof(struct spdk_scsi_desig_desc) + desig->len;
 
-			/* should not exceed the data_in buffer length */
-			if (sizeof(struct spdk_scsi_vpd_page) + len > alloc_len) {
-				spdk_scsi_task_set_status(task, SPDK_SCSI_STATUS_CHECK_CONDITION,
-							  SPDK_SCSI_SENSE_ILLEGAL_REQUEST,
-							  SPDK_SCSI_ASC_INVALID_FIELD_IN_CDB,
-							  SPDK_SCSI_ASCQ_CAUSE_NOT_REPORTABLE);
-				return -1;
-			}
 			to_be16(vpage->alloc_len, len);
 
 			break;
@@ -1255,9 +1247,6 @@ spdk_bdev_scsi_task_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_sta
 	} else if (task->type == SPDK_SCSI_TASK_TYPE_MANAGE) {
 		if (status == SPDK_BDEV_IO_STATUS_SUCCESS)
 			task->response = SPDK_SCSI_TASK_MGMT_RESP_SUCCESS;
-		if (task->function == SPDK_SCSI_TASK_FUNC_LUN_RESET) {
-			spdk_scsi_lun_clear_all(task->lun);
-		}
 	}
 	if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ && task->iovs != bdev_io->u.read.iovs) {
 		assert(task->iovcnt == bdev_io->u.read.iovcnt);
@@ -1724,6 +1713,7 @@ spdk_bdev_scsi_process_primary(struct spdk_bdev *bdev,
 		alloc_len = from_be16(&cdb[3]);
 		data_len = SPDK_MAX(4096, alloc_len);
 		data = spdk_zmalloc(data_len, 0, NULL);
+		assert(data != NULL);
 		rc = spdk_bdev_scsi_inquiry(bdev, task, cdb, data, data_len);
 		data_len = SPDK_MIN(rc, data_len);
 		if (rc < 0) {
@@ -1747,6 +1737,7 @@ spdk_bdev_scsi_process_primary(struct spdk_bdev *bdev,
 
 		data_len = SPDK_MAX(4096, alloc_len);
 		data = spdk_zmalloc(data_len, 0, NULL);
+		assert(data != NULL);
 		rc = spdk_bdev_scsi_report_luns(task->lun, sel, data, data_len);
 		data_len = rc;
 		if (rc < 0) {
@@ -1854,6 +1845,7 @@ spdk_bdev_scsi_process_primary(struct spdk_bdev *bdev,
 
 		data_len = rc;
 		data = spdk_zmalloc(data_len, 0, NULL);
+		assert(data != NULL);
 
 		/* First call with no buffer to discover needed buffer size */
 		rc = spdk_bdev_scsi_mode_sense(bdev, md,
@@ -1895,6 +1887,7 @@ spdk_bdev_scsi_process_primary(struct spdk_bdev *bdev,
 
 		data_len = task->sense_data_len;
 		data = spdk_zmalloc(data_len, 0, NULL);
+		assert(data != NULL);
 		memcpy(data, task->sense_data, data_len);
 		break;
 	}
@@ -1970,6 +1963,6 @@ spdk_bdev_scsi_execute(struct spdk_bdev *bdev, struct spdk_scsi_task *task)
 int
 spdk_bdev_scsi_reset(struct spdk_bdev *bdev, struct spdk_scsi_task *task)
 {
-	return spdk_bdev_reset(bdev, SPDK_BDEV_RESET_HARD,
+	return spdk_bdev_reset(bdev, SPDK_BDEV_RESET_SOFT,
 			       spdk_bdev_scsi_task_complete, task);
 }

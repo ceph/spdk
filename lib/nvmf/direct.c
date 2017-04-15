@@ -38,6 +38,8 @@
 #include "spdk/nvme.h"
 #include "spdk/nvmf_spec.h"
 #include "spdk/trace.h"
+#include "spdk/util.h"
+#include "spdk/event.h"
 
 #include "spdk_internal/log.h"
 
@@ -51,9 +53,28 @@ nvmf_direct_ctrlr_get_data(struct spdk_nvmf_session *session)
 }
 
 static void
+nvmf_direct_ctrlr_poll_for_admin_completions(void *arg)
+{
+	struct spdk_nvmf_subsystem *subsystem = arg;
+
+	spdk_nvme_ctrlr_process_admin_completions(subsystem->dev.direct.ctrlr);
+}
+
+static void
 nvmf_direct_ctrlr_poll_for_completions(struct spdk_nvmf_subsystem *subsystem)
 {
-	spdk_nvme_ctrlr_process_admin_completions(subsystem->dev.direct.ctrlr);
+	if (subsystem->dev.direct.outstanding_admin_cmd_count > 0) {
+		nvmf_direct_ctrlr_poll_for_admin_completions(subsystem);
+	}
+
+	if (subsystem->dev.direct.admin_poller == NULL) {
+		int lcore = spdk_env_get_current_core();
+
+		spdk_poller_register(&subsystem->dev.direct.admin_poller,
+				     nvmf_direct_ctrlr_poll_for_admin_completions,
+				     subsystem, lcore, 10000);
+	}
+
 	spdk_nvme_qpair_process_completions(subsystem->dev.direct.io_qpair, 0);
 }
 
@@ -67,6 +88,17 @@ nvmf_direct_ctrlr_complete_cmd(void *ctx, const struct spdk_nvme_cpl *cmp)
 	req->rsp->nvme_cpl = *cmp;
 
 	spdk_nvmf_request_complete(req);
+}
+
+static void
+nvmf_direct_ctrlr_complete_admin_cmd(void *ctx, const struct spdk_nvme_cpl *cmp)
+{
+	struct spdk_nvmf_request *req = ctx;
+	struct spdk_nvmf_subsystem *subsystem = req->conn->sess->subsys;
+
+	subsystem->dev.direct.outstanding_admin_cmd_count--;
+
+	nvmf_direct_ctrlr_complete_cmd(ctx, cmp);
 }
 
 static int
@@ -96,7 +128,7 @@ nvmf_direct_ctrlr_admin_identify_nslist(struct spdk_nvme_ctrlr *ctrlr,
 		}
 
 		ns_list->ns_list[count++] = i;
-		if (count == sizeof(*ns_list) / sizeof(uint32_t)) {
+		if (count == SPDK_COUNTOF(ns_list->ns_list)) {
 			break;
 		}
 	}
@@ -176,10 +208,8 @@ nvmf_direct_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req)
 		}
 		break;
 	case SPDK_NVME_OPC_ASYNC_EVENT_REQUEST:
-		SPDK_TRACELOG(SPDK_TRACE_NVMF, "Async Event Request\n");
-		/* TODO: Just release the request as consumed. AER events will never
-		 * be triggered. */
-		return SPDK_NVMF_REQUEST_EXEC_STATUS_RELEASE;
+		return spdk_nvmf_session_async_event_request(req);
+
 	case SPDK_NVME_OPC_KEEP_ALIVE:
 		SPDK_TRACELOG(SPDK_TRACE_NVMF, "Keep Alive\n");
 		/*
@@ -207,13 +237,16 @@ passthrough:
 		rc = spdk_nvme_ctrlr_cmd_admin_raw(subsystem->dev.direct.ctrlr,
 						   cmd,
 						   req->data, req->length,
-						   nvmf_direct_ctrlr_complete_cmd,
+						   nvmf_direct_ctrlr_complete_admin_cmd,
 						   req);
 		if (rc) {
 			SPDK_ERRLOG("Error submitting admin opc 0x%02x\n", cmd->opc);
 			response->status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
 			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 		}
+
+		subsystem->dev.direct.outstanding_admin_cmd_count++;
+
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS;
 	}
 
@@ -245,11 +278,45 @@ static void
 nvmf_direct_ctrlr_detach(struct spdk_nvmf_subsystem *subsystem)
 {
 	if (subsystem->dev.direct.ctrlr) {
+		if (subsystem->dev.direct.admin_poller != NULL) {
+			spdk_poller_unregister(&subsystem->dev.direct.admin_poller, NULL);
+		}
+
 		spdk_nvme_detach(subsystem->dev.direct.ctrlr);
 	}
 }
 
+static void
+nvmf_direct_ctrlr_complete_aer(void *arg, const struct spdk_nvme_cpl *cpl)
+{
+	struct spdk_nvmf_subsystem *subsystem = (struct spdk_nvmf_subsystem *) arg;
+	struct spdk_nvmf_session *session;
+
+	TAILQ_FOREACH(session, &subsystem->sessions, link) {
+		if (session->aer_req) {
+			nvmf_direct_ctrlr_complete_cmd(session->aer_req, cpl);
+			session->aer_req = NULL;
+		}
+	}
+}
+
+static int
+nvmf_direct_ctrlr_attach(struct spdk_nvmf_subsystem *subsystem)
+{
+	subsystem->dev.direct.io_qpair = spdk_nvme_ctrlr_alloc_io_qpair(subsystem->dev.direct.ctrlr, 0);
+	if (subsystem->dev.direct.io_qpair == NULL) {
+		SPDK_ERRLOG("spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
+		return -1;
+	}
+
+	spdk_nvme_ctrlr_register_aer_callback(subsystem->dev.direct.ctrlr,
+					      nvmf_direct_ctrlr_complete_aer, subsystem);
+
+	return 0;
+}
+
 const struct spdk_nvmf_ctrlr_ops spdk_nvmf_direct_ctrlr_ops = {
+	.attach				= nvmf_direct_ctrlr_attach,
 	.ctrlr_get_data			= nvmf_direct_ctrlr_get_data,
 	.process_admin_cmd		= nvmf_direct_ctrlr_process_admin_cmd,
 	.process_io_cmd			= nvmf_direct_ctrlr_process_io_cmd,

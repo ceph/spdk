@@ -42,6 +42,25 @@
 
 SPDK_LOG_REGISTER_TRACE_FLAG("nvmf", SPDK_TRACE_NVMF)
 
+uint32_t
+spdk_env_get_current_core(void)
+{
+	return 0;
+}
+
+void
+spdk_poller_register(struct spdk_poller **ppoller, spdk_poller_fn fn, void *arg,
+		     uint32_t lcore, uint64_t period_microseconds)
+{
+	return;
+}
+
+void
+spdk_poller_unregister(struct spdk_poller **ppoller, struct spdk_event *complete)
+{
+	return;
+}
+
 int32_t
 spdk_nvme_ctrlr_process_admin_completions(struct spdk_nvme_ctrlr *ctrlr)
 {
@@ -64,6 +83,13 @@ const struct spdk_nvme_ctrlr_data *
 spdk_nvme_ctrlr_get_data(struct spdk_nvme_ctrlr *ctrlr)
 {
 	return NULL;
+}
+
+void
+spdk_nvme_ctrlr_register_aer_callback(struct spdk_nvme_ctrlr *ctrlr,
+				      spdk_nvme_aer_cb aer_cb_fn,
+				      void *aer_cb_arg)
+{
 }
 
 int
@@ -108,6 +134,12 @@ int
 spdk_nvme_detach(struct spdk_nvme_ctrlr *ctrlr)
 {
 	return -1;
+}
+
+struct spdk_nvme_qpair *
+spdk_nvme_ctrlr_alloc_io_qpair(struct spdk_nvme_ctrlr *ctrlr, enum spdk_nvme_qprio qprio)
+{
+	return NULL;
 }
 
 int32_t
@@ -163,6 +195,12 @@ spdk_nvmf_session_set_features_async_event_configuration(struct spdk_nvmf_reques
 
 int
 spdk_nvmf_session_get_features_async_event_configuration(struct spdk_nvmf_request *req)
+{
+	return -1;
+}
+
+int
+spdk_nvmf_session_async_event_request(struct spdk_nvmf_request *req)
 {
 	return -1;
 }

@@ -87,31 +87,32 @@
 
 # NVMe configuration options
 [Nvme]
-# NVMe Device Whitelist
-# Users may specify which NVMe devices to claim by their PCI
-# domain, bus, device, and function. The format is dddd:bb:dd.f, which is
-# the same format displayed by lspci or in /sys/bus/pci/devices. The second
-# argument is a "name" for the device that can be anything. The name
-# is referenced later in the Subsystem section.
-#
-# Alternatively, the user can specify ClaimAllDevices. All
-# NVMe devices will be claimed and named Nvme0, Nvme1, etc.
-  BDF 0000:00:00.0 Nvme0
-  BDF 0000:01:00.0 Nvme1
+  # NVMe Device Whitelist
+  # Users may specify which NVMe devices to claim by their transport id.
+  # See spdk_nvme_transport_id_parse() in spdk/nvme.h for the correct format.
+  # The second argument is the assigned name, which can be referenced from
+  # other sections in the configuration file. For NVMe devices, a namespace
+  # is automatically appended to each name in the format <YourName>nY, where
+  # Y is the NSID (starts at 1).
+  TransportID "trtype:PCIe traddr:0000:00:00.0" Nvme0
+  TransportID "trtype:PCIe traddr:0000:01:00.0" Nvme1
 
   # The number of attempts per I/O when an I/O fails. Do not include
   # this key to get the default behavior.
-  NvmeRetryCount 4
-  # The maximum number of NVMe controllers to claim. Do not include this key to
-  # claim all of them.
-  NumControllers 2
-  # Registers the application to receive timeout callback and to reset the controller.
-  ResetControllerOnTimeout Yes
-  # Timeout value.
-  NvmeTimeoutValue 30
+  RetryCount 4
+  # Timeout for each command, in seconds. If 0, don't track timeouts.
+  Timeout 0
+  # Action to take on command time out. Only valid when Timeout is greater
+  # than 0. This may be 'Reset' to reset the controller, 'Abort' to abort
+  # the command, or 'None' to just print a message but do nothing.
+  # Admin command timeouts will always result in a reset.
+  ActionOnTimeout None
   # Set how often the admin queue is polled for asynchronous events.
   # Units in microseconds.
   AdminPollRate 100000
+
+  # Enable handling of hotplug (runtime insert and remove) events
+  HotplugEnable Yes
 
 # Users may change this section to create a different number or size of
 #  malloc LUNs.
@@ -135,10 +136,14 @@
   Whitelist 00:04.1
 
 # Users must change this section to match the /dev/sdX devices to be
-#  exported as iSCSI LUNs. The devices are accessed using Linux AIO.
+# exported as iSCSI LUNs. The devices are accessed using Linux AIO.
+# The format is:
+# AIO <file name> <bdev name>
+# The file name is the backing device
+# The bdev name can be referenced from elsewhere in the configuration file.
 [AIO]
-  AIO /dev/sdb
-  AIO /dev/sdc
+  AIO /dev/sdb AIO0
+  AIO /dev/sdc AIO1
 
 # The Split virtual block device slices block devices into multiple smaller bdevs.
 [Split]
@@ -181,5 +186,5 @@
   AuthMethod Auto
   AuthGroup AuthGroup1
   UseDigest Auto
-  LUN0 Nvme0
+  LUN0 Nvme0n1
   QueueDepth 32

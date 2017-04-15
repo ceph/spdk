@@ -50,6 +50,24 @@ static bool g_lun_execute_fail = false;
 static int g_lun_execute_status = SPDK_SCSI_TASK_PENDING;
 static uint32_t g_task_count = 0;
 
+void
+spdk_poller_register(struct spdk_poller **ppoller, spdk_poller_fn fn, void *arg,
+		     uint32_t lcore, uint64_t period_microseconds)
+{
+}
+
+void
+spdk_poller_unregister(struct spdk_poller **ppoller,
+		       struct spdk_event *complete)
+{
+}
+
+uint32_t
+spdk_env_get_current_core(void)
+{
+	return 0;
+}
+
 void spdk_trace_record(uint16_t tpoint_id, uint16_t poller_id, uint32_t size,
 		       uint64_t object_id, uint64_t arg1)
 {
@@ -109,7 +127,8 @@ spdk_bdev_free_io(struct spdk_bdev_io *bdev_io)
 }
 
 bool
-spdk_bdev_claim(struct spdk_bdev *bdev)
+spdk_bdev_claim(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb,
+		void *remove_ctx)
 {
 	return true;
 }
@@ -442,7 +461,7 @@ lun_append_task_null_lun_task_cdb_spc_inquiry(void)
 	task->cdb[4] = 0xFF;
 	task->lun = NULL;
 
-	spdk_scsi_lun_append_task(NULL, task);
+	spdk_scsi_task_process_null_lun(task);
 
 	CU_ASSERT_EQUAL(task->status, SPDK_SCSI_STATUS_GOOD);
 
@@ -465,7 +484,7 @@ lun_append_task_null_lun_alloc_len_lt_4096(void)
 	task->cdb[4] = 0;
 	/* alloc_len is set to a minimal value of 4096
 	 * Hence, rbuf of size 4096 is allocated*/
-	spdk_scsi_lun_append_task(NULL, task);
+	spdk_scsi_task_process_null_lun(task);
 
 	CU_ASSERT_EQUAL(task->status, SPDK_SCSI_STATUS_GOOD);
 
@@ -484,7 +503,7 @@ lun_append_task_null_lun_not_supported(void)
 	task->cdb = cdb;
 	task->lun = NULL;
 
-	spdk_scsi_lun_append_task(NULL, task);
+	spdk_scsi_task_process_null_lun(task);
 
 	CU_ASSERT_EQUAL(task->status, SPDK_SCSI_STATUS_CHECK_CONDITION);
 	/* LUN not supported; task's data transferred should be 0 */
@@ -616,7 +635,7 @@ lun_construct_same_same_twice(void)
 	lun = spdk_scsi_lun_construct("lun0", &bdev);
 
 	/* Successfully constructs and returns lun */
-	CU_ASSERT(lun != NULL);
+	SPDK_CU_ASSERT_FATAL(lun != NULL);
 
 	lun2 = spdk_scsi_lun_construct("lun0", &bdev2);
 
@@ -629,17 +648,25 @@ lun_construct_same_same_twice(void)
 }
 
 static void
-lun_deletable(void)
+lun_delete(void)
 {
 	struct spdk_scsi_lun *lun;
 	int rc;
 
 	lun = lun_construct();
-	rc = spdk_scsi_lun_deletable(lun->name);
-	CU_ASSERT_EQUAL(rc, 0);
-	lun_destruct(lun);
 
-	rc = spdk_scsi_lun_deletable("test");
+	rc = spdk_scsi_lun_delete(lun->name);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	lun = lun_construct();
+
+	rc = spdk_scsi_lun_claim(lun);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	rc = spdk_scsi_lun_delete(lun->name);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	rc = spdk_scsi_lun_delete("test");
 	CU_ASSERT_EQUAL(rc, -1);
 }
 
@@ -691,7 +718,7 @@ main(int argc, char **argv)
 		|| CU_add_test(suite, "construct - null ctx", lun_construct_null_ctx) == NULL
 		|| CU_add_test(suite, "construct - success", lun_construct_success) == NULL
 		|| CU_add_test(suite, "construct - same lun twice", lun_construct_same_same_twice) == NULL
-		|| CU_add_test(suite, "deletable", lun_deletable) == NULL
+		|| CU_add_test(suite, "lun_delete", lun_delete) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();

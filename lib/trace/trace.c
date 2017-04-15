@@ -255,15 +255,15 @@ spdk_trace_register_description(const char *name, const char *short_name,
 	tpoint = &g_trace_histories->tpoint[tpoint_id];
 	assert(tpoint->tpoint_id == 0);
 
-	strncpy(tpoint->name, name, sizeof(tpoint->name));
-	strncpy(tpoint->short_name, short_name, sizeof(tpoint->short_name));
+	snprintf(tpoint->name, sizeof(tpoint->name), "%s", name);
+	snprintf(tpoint->short_name, sizeof(tpoint->short_name), "%s", short_name);
 	tpoint->tpoint_id = tpoint_id;
 	tpoint->object_type = object_type;
 	tpoint->owner_type = owner_type;
 	tpoint->new_object = new_object;
 	tpoint->arg1_is_ptr = arg1_is_ptr;
 	tpoint->arg1_is_alias = arg1_is_alias;
-	strncpy(tpoint->arg1_name, arg1_name, sizeof(tpoint->arg1_name));
+	snprintf(tpoint->arg1_name, sizeof(tpoint->arg1_name), "%s", arg1_name);
 }
 
 void

@@ -44,21 +44,22 @@ bool trace_flag = false;
 
 struct nvme_driver _g_nvme_driver = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
-	.request_mempool = NULL,
 };
 
 struct nvme_request *
-nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
+nvme_allocate_request(struct spdk_nvme_qpair *qpair,
+		      const struct nvme_payload *payload, uint32_t payload_size,
 		      spdk_nvme_cmd_cb cb_fn,
 		      void *cb_arg)
 {
-	struct nvme_request *req = NULL;
+	struct nvme_request *req;
 
-	req = spdk_mempool_get(_g_nvme_driver.request_mempool);
-
+	req = STAILQ_FIRST(&qpair->free_req);
 	if (req == NULL) {
-		return req;
+		return NULL;
 	}
+
+	STAILQ_REMOVE_HEAD(&qpair->free_req, stailq);
 
 	/*
 	 * Only memset up to (but not including) the children
@@ -73,33 +74,36 @@ nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
 	req->cb_arg = cb_arg;
 	req->payload = *payload;
 	req->payload_size = payload_size;
+	req->qpair = qpair;
 	req->pid = getpid();
 
 	return req;
 }
 
 struct nvme_request *
-nvme_allocate_request_contig(void *buffer, uint32_t payload_size, spdk_nvme_cmd_cb cb_fn,
-			     void *cb_arg)
+nvme_allocate_request_contig(struct spdk_nvme_qpair *qpair, void *buffer, uint32_t payload_size,
+			     spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
 	struct nvme_payload payload;
 
 	payload.type = NVME_PAYLOAD_TYPE_CONTIG;
 	payload.u.contig = buffer;
 
-	return nvme_allocate_request(&payload, payload_size, cb_fn, cb_arg);
+	return nvme_allocate_request(qpair, &payload, payload_size, cb_fn, cb_arg);
 }
 
 struct nvme_request *
-nvme_allocate_request_null(spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+nvme_allocate_request_null(struct spdk_nvme_qpair *qpair, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	return nvme_allocate_request_contig(NULL, 0, cb_fn, cb_arg);
+	return nvme_allocate_request_contig(qpair, NULL, 0, cb_fn, cb_arg);
 }
 
 void
 nvme_free_request(struct nvme_request *req)
 {
-	spdk_mempool_put(_g_nvme_driver.request_mempool, req);
+	SPDK_CU_ASSERT_FATAL(req != NULL);
+	SPDK_CU_ASSERT_FATAL(req->qpair != NULL);
+	STAILQ_INSERT_HEAD(&req->qpair->free_req, req, stailq);
 }
 
 void
@@ -142,6 +146,12 @@ nvme_transport_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t
 	return 0;
 }
 
+int
+spdk_nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair *qpair)
+{
+	return 0;
+}
+
 static void
 prepare_submit_request_test(struct spdk_nvme_qpair *qpair,
 			    struct spdk_nvme_ctrlr *ctrlr)
@@ -150,12 +160,13 @@ prepare_submit_request_test(struct spdk_nvme_qpair *qpair,
 	ctrlr->free_io_qids = NULL;
 	TAILQ_INIT(&ctrlr->active_io_qpairs);
 	TAILQ_INIT(&ctrlr->active_procs);
-	nvme_qpair_init(qpair, 1, ctrlr, 0);
+	nvme_qpair_init(qpair, 1, ctrlr, 0, 32);
 }
 
 static void
 cleanup_submit_request_test(struct spdk_nvme_qpair *qpair)
 {
+	free(qpair->req_buf);
 }
 
 static void
@@ -179,7 +190,7 @@ test3(void)
 
 	prepare_submit_request_test(&qpair, &ctrlr);
 
-	req = nvme_allocate_request_null(expected_success_callback, NULL);
+	req = nvme_allocate_request_null(&qpair, expected_success_callback, NULL);
 	SPDK_CU_ASSERT_FATAL(req != NULL);
 
 	CU_ASSERT(nvme_qpair_submit_request(&qpair, req) == 0);
@@ -199,7 +210,8 @@ test_ctrlr_failed(void)
 
 	prepare_submit_request_test(&qpair, &ctrlr);
 
-	req = nvme_allocate_request_contig(payload, sizeof(payload), expected_failure_callback, NULL);
+	req = nvme_allocate_request_contig(&qpair, payload, sizeof(payload), expected_failure_callback,
+					   NULL);
 	SPDK_CU_ASSERT_FATAL(req != NULL);
 
 	/* Set the controller to failed.

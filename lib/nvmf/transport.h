@@ -102,17 +102,9 @@ struct spdk_nvmf_transport {
 
 	/*
 	 * Signal request completion, which sends a response
-	 * to the originator. A request can either
-	 * be completed or released, but not both.
+	 * to the originator.
 	 */
 	int (*req_complete)(struct spdk_nvmf_request *req);
-
-	/*
-	 * Signal that the request can be released without sending
-	 * a response. A request can either be completed or release,
-	 * but not both.
-	 */
-	int (*req_release)(struct spdk_nvmf_request *req);
 
 	/*
 	 * Deinitialize a connection.
@@ -123,6 +115,11 @@ struct spdk_nvmf_transport {
 	 * Poll a connection for events.
 	 */
 	int (*conn_poll)(struct spdk_nvmf_conn *conn);
+
+	/*
+	 * True if the conn has no pending IO.
+	 */
+	bool (*conn_is_idle)(struct spdk_nvmf_conn *conn);
 };
 
 int spdk_nvmf_transport_init(void);

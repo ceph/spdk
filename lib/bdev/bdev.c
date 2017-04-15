@@ -43,6 +43,7 @@
 #include <rte_mempool.h>
 #include <rte_version.h>
 
+#include "spdk/env.h"
 #include "spdk/queue.h"
 #include "spdk/nvme_spec.h"
 
@@ -162,7 +163,7 @@ static int spdk_initialize_rbuf_pool(void)
 	 *   using spdk_event_get_active_core_count() to determine how many local caches we need
 	 *   to account for.
 	 */
-	cache_size = RBUF_SMALL_POOL_SIZE / (2 * spdk_app_get_core_count());
+	cache_size = RBUF_SMALL_POOL_SIZE / (2 * spdk_env_get_core_count());
 	if (cache_size > RTE_MEMPOOL_CACHE_MAX_SIZE)
 		cache_size = RTE_MEMPOOL_CACHE_MAX_SIZE;
 	g_rbuf_small_pool = rte_mempool_create("rbuf_small_pool",
@@ -175,7 +176,7 @@ static int spdk_initialize_rbuf_pool(void)
 		return -1;
 	}
 
-	cache_size = RBUF_LARGE_POOL_SIZE / (2 * spdk_app_get_core_count());
+	cache_size = RBUF_LARGE_POOL_SIZE / (2 * spdk_env_get_core_count());
 	if (cache_size > RTE_MEMPOOL_CACHE_MAX_SIZE)
 		cache_size = RTE_MEMPOOL_CACHE_MAX_SIZE;
 	g_rbuf_large_pool = rte_mempool_create("rbuf_large_pool",
@@ -497,14 +498,14 @@ spdk_bdev_get_child_io(struct spdk_bdev_io *parent,
 bool
 spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_type)
 {
-	return bdev->fn_table->io_type_supported(bdev, io_type);
+	return bdev->fn_table->io_type_supported(bdev->ctxt, io_type);
 }
 
 int
 spdk_bdev_dump_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 {
 	if (bdev->fn_table->dump_config_json) {
-		return bdev->fn_table->dump_config_json(bdev, w);
+		return bdev->fn_table->dump_config_json(bdev->ctxt, w);
 	}
 
 	return 0;
@@ -513,7 +514,7 @@ spdk_bdev_dump_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w
 struct spdk_io_channel *
 spdk_bdev_get_io_channel(struct spdk_bdev *bdev, uint32_t priority)
 {
-	return bdev->fn_table->get_io_channel(bdev, priority);
+	return bdev->fn_table->get_io_channel(bdev->ctxt, priority);
 }
 
 static int
@@ -546,6 +547,7 @@ spdk_bdev_read(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	if (spdk_bdev_io_valid(bdev, offset, nbytes) != 0) {
 		return NULL;
 	}
@@ -585,6 +587,7 @@ spdk_bdev_readv(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	if (spdk_bdev_io_valid(bdev, offset, nbytes) != 0) {
 		return NULL;
 	}
@@ -621,6 +624,7 @@ spdk_bdev_write(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	if (spdk_bdev_io_valid(bdev, offset, nbytes) != 0) {
 		return NULL;
 	}
@@ -659,6 +663,7 @@ spdk_bdev_writev(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	if (spdk_bdev_io_valid(bdev, offset, len) != 0) {
 		return NULL;
 	}
@@ -695,6 +700,7 @@ spdk_bdev_unmap(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	if (bdesc_count == 0) {
 		SPDK_ERRLOG("Invalid bdesc_count 0\n");
 		return NULL;
@@ -735,6 +741,7 @@ spdk_bdev_flush(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	bdev_io = spdk_bdev_get_io();
 	if (!bdev_io) {
 		SPDK_ERRLOG("bdev_io memory allocation failed duing flush\n");
@@ -763,6 +770,7 @@ spdk_bdev_reset(struct spdk_bdev *bdev, enum spdk_bdev_reset_type reset_type,
 	struct spdk_bdev_io *bdev_io;
 	int rc;
 
+	assert(bdev->status != SPDK_BDEV_STATUS_UNCLAIMED);
 	bdev_io = spdk_bdev_get_io();
 	if (!bdev_io) {
 		SPDK_ERRLOG("bdev_io memory allocation failed duing reset\n");
@@ -837,7 +845,7 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 		 * Defer completion via an event to avoid potential infinite recursion if the
 		 * user's completion callback issues a new I/O.
 		 */
-		spdk_event_call(spdk_event_allocate(spdk_app_get_current_core(),
+		spdk_event_call(spdk_event_allocate(spdk_env_get_current_core(),
 						    bdev_io_deferred_completion,
 						    bdev_io,
 						    (void *)status));
@@ -921,8 +929,7 @@ spdk_bdev_register(struct spdk_bdev *bdev)
 	bdev->gencnt = 0;
 
 	pthread_mutex_init(&bdev->mutex, NULL);
-	bdev->claimed = false;
-
+	bdev->status = SPDK_BDEV_STATUS_UNCLAIMED;
 	SPDK_TRACELOG(SPDK_TRACE_DEBUG, "Inserting bdev %s into list\n", bdev->name);
 	TAILQ_INSERT_TAIL(&spdk_bdev_list, bdev, link);
 }
@@ -933,7 +940,22 @@ spdk_bdev_unregister(struct spdk_bdev *bdev)
 	int			rc;
 
 	SPDK_TRACELOG(SPDK_TRACE_DEBUG, "Removing bdev %s from list\n", bdev->name);
+
+	pthread_mutex_lock(&bdev->mutex);
+	assert(bdev->status == SPDK_BDEV_STATUS_CLAIMED || bdev->status == SPDK_BDEV_STATUS_UNCLAIMED);
+	if (bdev->status == SPDK_BDEV_STATUS_CLAIMED) {
+		if (bdev->remove_cb) {
+			bdev->status = SPDK_BDEV_STATUS_REMOVING;
+			pthread_mutex_unlock(&bdev->mutex);
+			bdev->remove_cb(bdev->remove_ctx);
+			return;
+		} else {
+			bdev->status = SPDK_BDEV_STATUS_UNCLAIMED;
+		}
+	}
+
 	TAILQ_REMOVE(&spdk_bdev_list, bdev, link);
+	pthread_mutex_unlock(&bdev->mutex);
 
 	pthread_mutex_destroy(&bdev->mutex);
 
@@ -944,15 +966,18 @@ spdk_bdev_unregister(struct spdk_bdev *bdev)
 }
 
 bool
-spdk_bdev_claim(struct spdk_bdev *bdev)
+spdk_bdev_claim(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb,
+		void *remove_ctx)
 {
 	bool success;
 
 	pthread_mutex_lock(&bdev->mutex);
 
-	if (!bdev->claimed) {
+	if (bdev->status != SPDK_BDEV_STATUS_CLAIMED) {
 		/* Take ownership of bdev. */
-		bdev->claimed = true;
+		bdev->remove_cb = remove_cb;
+		bdev->remove_ctx = remove_ctx;
+		bdev->status = SPDK_BDEV_STATUS_CLAIMED;
 		success = true;
 	} else {
 		/* bdev is already claimed. */
@@ -967,12 +992,21 @@ spdk_bdev_claim(struct spdk_bdev *bdev)
 void
 spdk_bdev_unclaim(struct spdk_bdev *bdev)
 {
+	bool do_unregister = false;
+
 	pthread_mutex_lock(&bdev->mutex);
-
-	assert(bdev->claimed);
-	bdev->claimed = false;
-
+	assert(bdev->status == SPDK_BDEV_STATUS_CLAIMED || bdev->status == SPDK_BDEV_STATUS_REMOVING);
+	if (bdev->status == SPDK_BDEV_STATUS_REMOVING) {
+		do_unregister = true;
+	}
+	bdev->remove_cb = NULL;
+	bdev->remove_ctx = NULL;
+	bdev->status = SPDK_BDEV_STATUS_UNCLAIMED;
 	pthread_mutex_unlock(&bdev->mutex);
+
+	if (do_unregister == true) {
+		spdk_bdev_unregister(bdev);
+	}
 }
 
 void

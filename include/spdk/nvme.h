@@ -107,6 +107,17 @@ struct spdk_nvme_ctrlr_opts {
 	 * Unused for local PCIe-attached NVMe devices.
 	 */
 	char hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+
+	/**
+	 * The number of requests to allocate for each NVMe I/O queue.
+	 *
+	 * This should be at least as large as io_queue_size.
+	 *
+	 * A single I/O may allocate more than one request, since splitting may be necessary to
+	 * conform to the device's maximum transfer size, PRP list compatibility requirements,
+	 * or driver-assisted striping.
+	 */
+	uint32_t io_queue_requests;
 };
 
 /**
@@ -194,6 +205,42 @@ struct spdk_nvme_transport_id {
  * memset() to 0) before calling this function.
  */
 int spdk_nvme_transport_id_parse(struct spdk_nvme_transport_id *trid, const char *str);
+
+/**
+ * Parse the string representation of a transport ID tranport type.
+ *
+ * \param trtype Output transport type (allocated by caller).
+ * \param str Input string representation of transport type (e.g. "PCIe", "RDMA")
+ * \return 0 if parsing was successful and trtype is filled out, or negated errno values on failure.
+ */
+int spdk_nvme_transport_id_parse_trtype(enum spdk_nvme_transport_type *trtype, const char *str);
+
+/**
+ * Parse the string representation of a tranport ID address family.
+ *
+ * \param adrfam Output address family (allocated by caller).
+ * \param str Input string representation of address family (e.g. "IPv4", "IPv6")
+ * \return 0 if parsing was successful and adrfam is filled out, or negated errno values on failure.
+ */
+int spdk_nvme_transport_id_parse_adrfam(enum spdk_nvmf_adrfam *adrfam, const char *str);
+
+/**
+ * Compare two transport IDs.
+ *
+ * \param trid1 First transport ID to compare.
+ * \param trid2 Second transport ID to compare.
+ *
+ * \return 0 if trid1 == trid2, less than 0 if trid1 < trid2, greater than 0 if trid1 > trid2.
+ *
+ * The result of this function may be used to sort transport IDs in a consistent order; however,
+ * the comparison result is not guaranteed to be consistent across library versions.
+ *
+ * This function uses a case-insensitive comparison for string fields, but it does not otherwise
+ * normalize the transport ID. It is the caller's responsibility to provide the transport IDs in
+ * a consistent format.
+ */
+int spdk_nvme_transport_id_compare(const struct spdk_nvme_transport_id *trid1,
+				   const struct spdk_nvme_transport_id *trid2);
 
 /**
  * Determine whether the NVMe library can handle a specific NVMe over Fabrics transport type.
@@ -385,6 +432,8 @@ struct spdk_nvme_qpair;
 /**
  * Signature for the callback function invoked when a timeout is
  * detected on a request.
+ * For timeouts detected on the admin queue pair, the qpair returned
+ * here will be NULL.
  */
 typedef void (*spdk_nvme_timeout_cb)(void *cb_arg,
 				     struct spdk_nvme_ctrlr *ctrlr,
@@ -556,6 +605,7 @@ int spdk_nvme_ctrlr_cmd_get_log_page(struct spdk_nvme_ctrlr *ctrlr,
  *
  * \param ctrlr NVMe controller to which the command was submitted.
  * \param qpair NVMe queue pair to which the command was submitted.
+ *              For admin commands, pass NULL for the qpair.
  * \param cid Command ID of the command to abort.
  * \param cb_fn Callback function to invoke when the abort has completed.
  * \param cb_arg Argument to pass to the callback function.\

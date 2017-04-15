@@ -141,6 +141,7 @@ static int g_num_workers = 0;
 
 static uint64_t g_tsc_rate;
 
+static uint32_t g_io_align = 0x200;
 static uint32_t g_io_size_bytes;
 static int g_rw_percentage;
 static int g_is_random;
@@ -259,6 +260,7 @@ static void
 register_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
 {
 	int nsid, num_ns;
+	struct spdk_nvme_ns *ns;
 	struct ctrlr_entry *entry = malloc(sizeof(struct ctrlr_entry));
 	const struct spdk_nvme_ctrlr_data *cdata = spdk_nvme_ctrlr_get_data(ctrlr);
 
@@ -286,7 +288,11 @@ register_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
 
 	num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
 	for (nsid = 1; nsid <= num_ns; nsid++) {
-		register_ns(ctrlr, spdk_nvme_ctrlr_get_ns(ctrlr, nsid));
+		ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+		if (ns == NULL) {
+			continue;
+		}
+		register_ns(ctrlr, ns);
 	}
 
 }
@@ -329,6 +335,14 @@ register_aio_file(const char *path)
 		fprintf(stderr, "Could not determine block size of AIO device %s\n", path);
 		close(fd);
 		return -1;
+	}
+
+	/*
+	 * TODO: This should really calculate the LCM of the current g_io_align and blklen.
+	 * For now, it's fairly safe to just assume all block sizes are powers of 2.
+	 */
+	if (g_io_align < blklen) {
+		g_io_align = blklen;
 	}
 
 	entry = malloc(sizeof(struct ns_entry));
@@ -396,7 +410,7 @@ aio_check_io(struct ns_worker_ctx *ns_ctx)
 static void task_ctor(struct rte_mempool *mp, void *arg, void *__task, unsigned id)
 {
 	struct perf_task *task = __task;
-	task->buf = spdk_zmalloc(g_io_size_bytes, 0x200, NULL);
+	task->buf = spdk_zmalloc(g_io_size_bytes, g_io_align, NULL);
 	if (task->buf == NULL) {
 		fprintf(stderr, "task->buf spdk_zmalloc failed\n");
 		exit(1);
@@ -650,15 +664,16 @@ static void usage(char *program_name)
 	printf("\t[-t time in seconds]\n");
 	printf("\t[-c core mask for I/O submission/completion.]\n");
 	printf("\t\t(default: 1)]\n");
-	printf("\t[-r discover info of remote NVMe over Fabrics target]\n");
+	printf("\t[-r Transport ID for local PCIe NVMe or NVMeoF]\n");
 	printf("\t Format: 'key:value [key:value] ...'\n");
 	printf("\t Keys:\n");
-	printf("\t  trtype      Transport type (e.g. RDMA)\n");
+	printf("\t  trtype      Transport type (e.g. PCIe, RDMA)\n");
 	printf("\t  adrfam      Address family (e.g. IPv4, IPv6)\n");
-	printf("\t  traddr      Transport address (e.g. 192.168.100.8)\n");
+	printf("\t  traddr      Transport address (e.g. 0000:04:00.0 for PCIe or 192.168.100.8 for RDMA)\n");
 	printf("\t  trsvcid     Transport service identifier (e.g. 4420)\n");
 	printf("\t  subnqn      Subsystem NQN (default: %s)\n", SPDK_NVMF_DISCOVERY_NQN);
-	printf("\t Example: -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420'\n");
+	printf("\t Example: -r 'trtype:PCIe traddr:0000:04:00.0' for PCIe or\n");
+	printf("\t          -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420' for NVMeoF\n");
 	printf("\t[-d DPDK huge memory size in MB.]\n");
 	printf("\t[-m max completions per poll]\n");
 	printf("\t\t(default: 0 - unlimited)\n");
@@ -970,7 +985,7 @@ parse_args(int argc, char **argv)
 
 	if (TAILQ_EMPTY(&g_trid_list)) {
 		/* If no transport IDs specified, default to enumerating all local PCIe devices */
-		add_trid("trtype:pcie");
+		add_trid("trtype:PCIe");
 	}
 
 	g_aio_optind = optind;
@@ -981,33 +996,22 @@ parse_args(int argc, char **argv)
 static int
 register_workers(void)
 {
-	unsigned lcore;
+	uint32_t i;
 	struct worker_thread *worker;
-	struct worker_thread *prev_worker;
 
-	worker = malloc(sizeof(struct worker_thread));
-	if (worker == NULL) {
-		perror("worker_thread malloc");
-		return -1;
-	}
+	g_workers = NULL;
+	g_num_workers = 0;
 
-	memset(worker, 0, sizeof(struct worker_thread));
-	worker->lcore = rte_get_master_lcore();
-
-	g_workers = worker;
-	g_num_workers = 1;
-
-	RTE_LCORE_FOREACH_SLAVE(lcore) {
-		prev_worker = worker;
-		worker = malloc(sizeof(struct worker_thread));
+	SPDK_ENV_FOREACH_CORE(i) {
+		worker = calloc(1, sizeof(*worker));
 		if (worker == NULL) {
-			perror("worker_thread malloc");
+			fprintf(stderr, "Unable to allocate worker\n");
 			return -1;
 		}
 
-		memset(worker, 0, sizeof(struct worker_thread));
-		worker->lcore = lcore;
-		prev_worker->next = worker;
+		worker->lcore = i;
+		worker->next = g_workers;
+		g_workers = worker;
 		g_num_workers++;
 	}
 
@@ -1063,6 +1067,8 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		       trid->traddr,
 		       pci_id.vendor_id, pci_id.device_id);
 	}
+
+	opts->io_queue_size = g_queue_depth + 1;
 
 	return true;
 }
@@ -1196,7 +1202,8 @@ associate_workers_with_ns(void)
 int main(int argc, char **argv)
 {
 	int rc;
-	struct worker_thread *worker;
+	struct worker_thread *worker, *master_worker;
+	unsigned master_core;
 	char task_pool_name[30];
 	uint32_t task_count;
 	struct spdk_env_opts opts;
@@ -1263,21 +1270,23 @@ int main(int argc, char **argv)
 	printf("Initialization complete. Launching workers.\n");
 
 	/* Launch all of the slave workers */
-	worker = g_workers->next;
+	master_core = rte_get_master_lcore();
+	master_worker = NULL;
+	worker = g_workers;
 	while (worker != NULL) {
-		rte_eal_remote_launch(work_fn, worker, worker->lcore);
-		worker = worker->next;
-	}
-
-	rc = work_fn(g_workers);
-
-	worker = g_workers->next;
-	while (worker != NULL) {
-		if (rte_eal_wait_lcore(worker->lcore) < 0) {
-			rc = -1;
+		if (worker->lcore != master_core) {
+			rte_eal_remote_launch(work_fn, worker, worker->lcore);
+		} else {
+			assert(master_worker == NULL);
+			master_worker = worker;
 		}
 		worker = worker->next;
 	}
+
+	assert(master_worker != NULL);
+	rc = work_fn(master_worker);
+
+	rte_eal_mp_wait_lcore();
 
 	print_stats();
 

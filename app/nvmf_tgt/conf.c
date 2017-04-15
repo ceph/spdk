@@ -86,7 +86,7 @@ struct spdk_nvmf_probe_ctx {
 #define SPDK_NVMF_CONFIG_MAX_IO_SIZE_MAX 131072
 
 struct spdk_nvmf_tgt_conf g_spdk_nvmf_tgt_conf;
-static int32_t g_last_rpc_lcore = -1;
+static int32_t g_last_core = -1;
 
 static int
 spdk_get_numa_node_value(const char *path)
@@ -276,7 +276,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	}
 	if (numa_node >= 0) {
 		/* Running subsystem and NVMe device is on the same socket or not */
-		if (rte_lcore_to_socket_id(ctx->app_subsystem->lcore) != (unsigned)numa_node) {
+		if (spdk_env_get_socket_id(ctx->app_subsystem->lcore) != (unsigned)numa_node) {
 			SPDK_WARNLOG("Subsystem %s is configured to run on a CPU core %u belonging "
 				     "to a different NUMA node than the associated NVMe device. "
 				     "This may result in reduced performance.\n",
@@ -284,7 +284,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 				     ctx->app_subsystem->lcore);
 			SPDK_WARNLOG("The NVMe device is on socket %u\n", numa_node);
 			SPDK_WARNLOG("The Subsystem is on socket %u\n",
-				     rte_lcore_to_socket_id(ctx->app_subsystem->lcore));
+				     spdk_env_get_socket_id(ctx->app_subsystem->lcore));
 		}
 	}
 
@@ -337,6 +337,7 @@ spdk_nvmf_parse_subsystem(struct spdk_conf_section *sp)
 	int lcore;
 	int num_listen_addrs;
 	struct rpc_listen_address listen_addrs[MAX_LISTEN_ADDRESSES];
+	char *listen_addrs_str[MAX_LISTEN_ADDRESSES] = {};
 	int num_hosts;
 	char *hosts[MAX_HOSTS];
 	const char *bdf;
@@ -351,21 +352,25 @@ spdk_nvmf_parse_subsystem(struct spdk_conf_section *sp)
 	/* Parse Listen sections */
 	num_listen_addrs = 0;
 	for (i = 0; i < MAX_LISTEN_ADDRESSES; i++) {
-		char *listen_addr;
-
-		listen_addrs[i].transport = spdk_conf_section_get_nmval(sp, "Listen", i, 0);
-		listen_addr = spdk_conf_section_get_nmval(sp, "Listen", i, 1);
-
-		if (!listen_addrs[i].transport || !listen_addr) {
+		listen_addrs[num_listen_addrs].transport =
+			spdk_conf_section_get_nmval(sp, "Listen", i, 0);
+		if (!listen_addrs[num_listen_addrs].transport) {
 			break;
 		}
 
-		listen_addr = strdup(listen_addr);
+		listen_addrs_str[i] = spdk_conf_section_get_nmval(sp, "Listen", i, 1);
+		if (!listen_addrs_str[i]) {
+			break;
+		}
 
-		ret = spdk_parse_ip_addr(listen_addr, &listen_addrs[i].traddr, &listen_addrs[i].trsvcid);
+		listen_addrs_str[i] = strdup(listen_addrs_str[i]);
+
+		ret = spdk_parse_ip_addr(listen_addrs_str[i], &listen_addrs[num_listen_addrs].traddr,
+					 &listen_addrs[num_listen_addrs].trsvcid);
 		if (ret < 0) {
-			SPDK_ERRLOG("Unable to parse listen address '%s'\n", listen_addr);
-			free(listen_addr);
+			SPDK_ERRLOG("Unable to parse listen address '%s'\n", listen_addrs_str[i]);
+			free(listen_addrs_str[i]);
+			listen_addrs_str[i] = NULL;
 			continue;
 		}
 
@@ -394,11 +399,17 @@ spdk_nvmf_parse_subsystem(struct spdk_conf_section *sp)
 		num_devs++;
 	}
 
-	return spdk_nvmf_construct_subsystem(nqn, mode_str, lcore,
-					     num_listen_addrs, listen_addrs,
-					     num_hosts, hosts,
-					     bdf, sn,
-					     num_devs, devs);
+	ret = spdk_nvmf_construct_subsystem(nqn, mode_str, lcore,
+					    num_listen_addrs, listen_addrs,
+					    num_hosts, hosts,
+					    bdf, sn,
+					    num_devs, devs);
+
+	for (i = 0; i < MAX_LISTEN_ADDRESSES; i++) {
+		free(listen_addrs_str[i]);
+	}
+
+	return ret;
 }
 
 static int
@@ -449,6 +460,7 @@ spdk_nvmf_construct_subsystem(const char *name,
 {
 	struct spdk_nvmf_subsystem *subsystem;
 	struct nvmf_tgt_subsystem *app_subsys;
+	struct spdk_nvmf_listen_addr *listen_addr;
 	enum spdk_nvmf_subsystem_mode mode;
 	int i;
 	uint64_t mask;
@@ -469,13 +481,13 @@ spdk_nvmf_construct_subsystem(const char *name,
 	}
 
 	if (lcore < 0) {
-		lcore = ++g_last_rpc_lcore;
+		lcore = ++g_last_core;
 	}
 
 	/* Determine which core to assign to the subsystem */
 	mask = spdk_app_get_core_mask();
 	lcore = spdk_nvmf_allocate_lcore(mask, lcore);
-	g_last_rpc_lcore = lcore;
+	g_last_core = lcore;
 
 	/* Determine the mode the subsysem will operate in */
 	if (mode_str == NULL) {
@@ -503,7 +515,7 @@ spdk_nvmf_construct_subsystem(const char *name,
 	/* Parse Listen sections */
 	for (i = 0; i < num_listen_addresses; i++) {
 		int nic_numa_node = spdk_get_ifaddr_numa_node(addresses[i].traddr);
-		unsigned subsys_numa_node = rte_lcore_to_socket_id(app_subsys->lcore);
+		unsigned subsys_numa_node = spdk_env_get_socket_id(app_subsys->lcore);
 
 		if (nic_numa_node >= 0) {
 			if (subsys_numa_node != (unsigned)nic_numa_node) {
@@ -517,8 +529,16 @@ spdk_nvmf_construct_subsystem(const char *name,
 			}
 		}
 
-		spdk_nvmf_subsystem_add_listener(subsystem, addresses[i].transport, addresses[i].traddr,
-						 addresses[i].trsvcid);
+		listen_addr = spdk_nvmf_tgt_listen(addresses[i].transport,
+						   addresses[i].traddr, addresses[i].trsvcid);
+		if (listen_addr == NULL) {
+			SPDK_ERRLOG("Failed to listen on transport %s, traddr %s, trsvcid %s\n",
+				    addresses[i].transport,
+				    addresses[i].traddr,
+				    addresses[i].trsvcid);
+			goto error;
+		}
+		spdk_nvmf_subsystem_add_listener(subsystem, listen_addr);
 	}
 
 	/* Parse Host sections */

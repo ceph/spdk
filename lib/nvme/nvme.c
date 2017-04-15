@@ -71,15 +71,18 @@ nvme_completion_poll_cb(void *arg, const struct spdk_nvme_cpl *cpl)
 }
 
 struct nvme_request *
-nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
+nvme_allocate_request(struct spdk_nvme_qpair *qpair,
+		      const struct nvme_payload *payload, uint32_t payload_size,
 		      spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	struct nvme_request *req = NULL;
+	struct nvme_request *req;
 
-	req = spdk_mempool_get(g_spdk_nvme_driver->request_mempool);
+	req = STAILQ_FIRST(&qpair->free_req);
 	if (req == NULL) {
 		return req;
 	}
+
+	STAILQ_REMOVE_HEAD(&qpair->free_req, stailq);
 
 	/*
 	 * Only memset up to (but not including) the children
@@ -94,14 +97,16 @@ nvme_allocate_request(const struct nvme_payload *payload, uint32_t payload_size,
 	req->cb_arg = cb_arg;
 	req->payload = *payload;
 	req->payload_size = payload_size;
+	req->qpair = qpair;
 	req->pid = getpid();
 
 	return req;
 }
 
 struct nvme_request *
-nvme_allocate_request_contig(void *buffer, uint32_t payload_size, spdk_nvme_cmd_cb cb_fn,
-			     void *cb_arg)
+nvme_allocate_request_contig(struct spdk_nvme_qpair *qpair,
+			     void *buffer, uint32_t payload_size,
+			     spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
 	struct nvme_payload payload;
 
@@ -109,13 +114,13 @@ nvme_allocate_request_contig(void *buffer, uint32_t payload_size, spdk_nvme_cmd_
 	payload.u.contig = buffer;
 	payload.md = NULL;
 
-	return nvme_allocate_request(&payload, payload_size, cb_fn, cb_arg);
+	return nvme_allocate_request(qpair, &payload, payload_size, cb_fn, cb_arg);
 }
 
 struct nvme_request *
-nvme_allocate_request_null(spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+nvme_allocate_request_null(struct spdk_nvme_qpair *qpair, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
-	return nvme_allocate_request_contig(NULL, 0, cb_fn, cb_arg);
+	return nvme_allocate_request_contig(qpair, NULL, 0, cb_fn, cb_arg);
 }
 
 static void
@@ -148,7 +153,8 @@ nvme_user_copy_cmd_complete(void *arg, const struct spdk_nvme_cpl *cpl)
  * where the overhead of a copy is not a problem.
  */
 struct nvme_request *
-nvme_allocate_request_user_copy(void *buffer, uint32_t payload_size, spdk_nvme_cmd_cb cb_fn,
+nvme_allocate_request_user_copy(struct spdk_nvme_qpair *qpair,
+				void *buffer, uint32_t payload_size, spdk_nvme_cmd_cb cb_fn,
 				void *cb_arg, bool host_to_controller)
 {
 	struct nvme_request *req;
@@ -166,7 +172,8 @@ nvme_allocate_request_user_copy(void *buffer, uint32_t payload_size, spdk_nvme_c
 		}
 	}
 
-	req = nvme_allocate_request_contig(contig_buffer, payload_size, nvme_user_copy_cmd_complete, NULL);
+	req = nvme_allocate_request_contig(qpair, contig_buffer, payload_size, nvme_user_copy_cmd_complete,
+					   NULL);
 	if (!req) {
 		spdk_free(contig_buffer);
 		return NULL;
@@ -185,8 +192,9 @@ nvme_free_request(struct nvme_request *req)
 {
 	assert(req != NULL);
 	assert(req->num_children == 0);
+	assert(req->qpair != NULL);
 
-	spdk_mempool_put(g_spdk_nvme_driver->request_mempool, req);
+	STAILQ_INSERT_HEAD(&req->qpair->free_req, req, stailq);
 }
 
 int
@@ -279,19 +287,6 @@ nvme_driver_init(void)
 
 	TAILQ_INIT(&g_spdk_nvme_driver->init_ctrlrs);
 	TAILQ_INIT(&g_spdk_nvme_driver->attached_ctrlrs);
-
-	g_spdk_nvme_driver->request_mempool = spdk_mempool_create("nvme_request", 8192,
-					      sizeof(struct nvme_request), 128, SPDK_ENV_SOCKET_ID_ANY);
-	if (g_spdk_nvme_driver->request_mempool == NULL) {
-		SPDK_ERRLOG("unable to allocate pool of requests\n");
-
-		nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
-		pthread_mutex_destroy(&g_spdk_nvme_driver->lock);
-
-		spdk_memzone_free(SPDK_NVME_DRIVER_NAME);
-
-		return -1;
-	}
 
 	nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 
@@ -443,9 +438,13 @@ spdk_nvme_probe(const struct spdk_nvme_transport_id *trid, void *cb_ctx,
 	return rc;
 }
 
-static int
-parse_trtype(enum spdk_nvme_transport_type *trtype, const char *str)
+int
+spdk_nvme_transport_id_parse_trtype(enum spdk_nvme_transport_type *trtype, const char *str)
 {
+	if (trtype == NULL || str == NULL) {
+		return -EINVAL;
+	}
+
 	if (strcasecmp(str, "PCIe") == 0) {
 		*trtype = SPDK_NVME_TRANSPORT_PCIE;
 	} else if (strcasecmp(str, "RDMA") == 0) {
@@ -456,9 +455,13 @@ parse_trtype(enum spdk_nvme_transport_type *trtype, const char *str)
 	return 0;
 }
 
-static int
-parse_adrfam(enum spdk_nvmf_adrfam *adrfam, const char *str)
+int
+spdk_nvme_transport_id_parse_adrfam(enum spdk_nvmf_adrfam *adrfam, const char *str)
 {
+	if (adrfam == NULL || str == NULL) {
+		return -EINVAL;
+	}
+
 	if (strcasecmp(str, "IPv4") == 0) {
 		*adrfam = SPDK_NVMF_ADRFAM_IPV4;
 	} else if (strcasecmp(str, "IPv6") == 0) {
@@ -524,12 +527,12 @@ spdk_nvme_transport_id_parse(struct spdk_nvme_transport_id *trid, const char *st
 		str += val_len;
 
 		if (strcasecmp(key, "trtype") == 0) {
-			if (parse_trtype(&trid->trtype, val) != 0) {
+			if (spdk_nvme_transport_id_parse_trtype(&trid->trtype, val) != 0) {
 				SPDK_ERRLOG("Unknown trtype '%s'\n", val);
 				return -EINVAL;
 			}
 		} else if (strcasecmp(key, "adrfam") == 0) {
-			if (parse_adrfam(&trid->adrfam, val) != 0) {
+			if (spdk_nvme_transport_id_parse_adrfam(&trid->adrfam, val) != 0) {
 				SPDK_ERRLOG("Unknown adrfam '%s'\n", val);
 				return -EINVAL;
 			}
@@ -557,6 +560,46 @@ spdk_nvme_transport_id_parse(struct spdk_nvme_transport_id *trid, const char *st
 		} else {
 			SPDK_ERRLOG("Unknown transport ID key '%s'\n", key);
 		}
+	}
+
+	return 0;
+}
+
+static int
+cmp_int(int a, int b)
+{
+	return a - b;
+}
+
+int
+spdk_nvme_transport_id_compare(const struct spdk_nvme_transport_id *trid1,
+			       const struct spdk_nvme_transport_id *trid2)
+{
+	int cmp;
+
+	cmp = cmp_int(trid1->trtype, trid2->trtype);
+	if (cmp) {
+		return cmp;
+	}
+
+	cmp = cmp_int(trid1->adrfam, trid2->adrfam);
+	if (cmp) {
+		return cmp;
+	}
+
+	cmp = strcasecmp(trid1->traddr, trid2->traddr);
+	if (cmp) {
+		return cmp;
+	}
+
+	cmp = strcasecmp(trid1->trsvcid, trid2->trsvcid);
+	if (cmp) {
+		return cmp;
+	}
+
+	cmp = strcasecmp(trid1->subnqn, trid2->subnqn);
+	if (cmp) {
+		return cmp;
 	}
 
 	return 0;

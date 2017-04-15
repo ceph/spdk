@@ -165,18 +165,39 @@ p.set_defaults(func=construct_malloc_bdev)
 
 
 def construct_aio_bdev(args):
-    params = {'fname': args.fname}
+    params = {'name': args.name,
+              'fname': args.fname}
+
     print_array(jsonrpc_call('construct_aio_bdev', params))
 
 p = subparsers.add_parser('construct_aio_bdev', help='Add a bdev with aio backend')
 p.add_argument('fname', help='Path to device or file (ex: /dev/sda)')
+p.add_argument('name', help='Block device name')
 p.set_defaults(func=construct_aio_bdev)
 
 def construct_nvme_bdev(args):
-    params = {'pci_address': args.pci_address}
-    print_array(jsonrpc_call('construct_nvme_bdev', params))
+    params = {'name': args.name,
+              'trtype': args.trtype,
+              'traddr': args.traddr}
+
+    if args.adrfam:
+        params['adrfam'] = args.adrfam
+
+    if args.trsvcid:
+        params['trsvcid'] = args.trsvcid
+
+    if args.subnqn:
+        params['subnqn'] = args.subnqn
+
+    jsonrpc_call('construct_nvme_bdev', params)
+
 p = subparsers.add_parser('construct_nvme_bdev', help='Add bdev with nvme backend')
-p.add_argument('pci_address', help='PCI address domain:bus:device.function')
+p.add_argument('-b', '--name', help="Name of the bdev", required=True)
+p.add_argument('-t', '--trtype', help='NVMe-oF target trtype: e.g., rdma, pcie', required=True)
+p.add_argument('-a', '--traddr', help='NVMe-oF target address: e.g., an ip address or BDF', required=True)
+p.add_argument('-f', '--adrfam', help='NVMe-oF target adrfam: e.g., ipv4, ipv6, ib, fc, intra_host')
+p.add_argument('-s', '--trsvcid', help='NVMe-oF target trsvcid: e.g., a port number')
+p.add_argument('-n', '--subnqn', help='NVMe-oF target subnqn')
 p.set_defaults(func=construct_nvme_bdev)
 
 def construct_rbd_bdev(args):
@@ -283,15 +304,6 @@ p.add_argument('tag', help='Initiator group tag (unique, integer > 0)', type=int
 p.set_defaults(func=delete_initiator_group)
 
 
-def delete_lun(args):
-    params = {'name': args.lun_name}
-    jsonrpc_call('delete_lun', params)
-
-p = subparsers.add_parser('delete_lun', help='Delete a LUN')
-p.add_argument('lun_name', help='LUN name to be deleted. Example: Malloc0.')
-p.set_defaults(func=delete_lun)
-
-
 def get_iscsi_connections(args):
     print_dict(jsonrpc_call('get_iscsi_connections'))
 
@@ -337,6 +349,16 @@ def get_bdevs(args):
 
 p = subparsers.add_parser('get_bdevs', help='Display current blockdev list')
 p.set_defaults(func=get_bdevs)
+
+
+def delete_bdev(args):
+    params = {'name': args.bdev_name}
+    jsonrpc_call('delete_bdev', params)
+
+p = subparsers.add_parser('delete_bdev', help='Delete a blockdev')
+p.add_argument('bdev_name', help='Blockdev name to be deleted. Example: Malloc0.')
+p.set_defaults(func=delete_bdev)
+
 
 def get_nvmf_subsystems(args):
     print_dict(jsonrpc_call('get_nvmf_subsystems'))
@@ -417,15 +439,16 @@ p = subparsers.add_parser('get_vhost_scsi_controllers', help='List vhost control
 p.set_defaults(func=get_vhost_scsi_controllers)
 
 def construct_vhost_scsi_controller(args):
-    params = {
-        'ctrlr': args.ctrlr,
-        'cpumask': args.cpu_mask
-    }
+    params = {'ctrlr': args.ctrlr}
+
+    if args.cpumask:
+        params['cpumask'] = args.cpumask
+
     jsonrpc_call('construct_vhost_scsi_controller', params)
 
 p = subparsers.add_parser('construct_vhost_scsi_controller', help='Add new vhost controller')
-p.add_argument('ctrlr', help='conntroller name')
-p.add_argument('cpumask', help='cpu mask for this controller')
+p.add_argument('ctrlr', help='controller name')
+p.add_argument('--cpumask', help='cpu mask for this controller')
 p.set_defaults(func=construct_vhost_scsi_controller)
 
 def add_vhost_scsi_lun(args):
