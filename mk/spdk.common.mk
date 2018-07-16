@@ -73,9 +73,6 @@ COMMON_CFLAGS = -g $(C_OPT) -Wall -Wextra -Wno-unused-parameter -Wno-missing-fie
 ifneq ($(filter powerpc%,$(TARGET_MACHINE)),)
 COMMON_CFLAGS += -mcpu=native
 endif
-ifeq ($(TARGET_MACHINE),x86_64)
-COMMON_CFLAGS += -march=native
-endif
 
 COMMON_CFLAGS += -include $(SPDK_ROOT_DIR)/config.h
 
