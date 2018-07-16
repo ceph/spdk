@@ -74,7 +74,7 @@ ifneq ($(filter powerpc%,$(TARGET_MACHINE)),)
 COMMON_CFLAGS += -mcpu=native
 endif
 ifeq ($(TARGET_MACHINE),x86_64)
-COMMON_CFLAGS += -march=native
+COMMON_CFLAGS += -march=core2
 endif
 
 COMMON_CFLAGS += -include $(SPDK_ROOT_DIR)/config.h
