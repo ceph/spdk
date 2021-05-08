@@ -447,16 +447,7 @@ def nvmf_discovery_get_referrals(client, tgt_name=None):
     return client.call('nvmf_discovery_get_referrals', params)
 
 
-def nvmf_subsystem_add_ns(client,
-                          nqn,
-                          bdev_name,
-                          tgt_name=None,
-                          ptpl_file=None,
-                          nsid=None,
-                          nguid=None,
-                          eui64=None,
-                          uuid=None,
-                          anagrpid=None):
+def nvmf_subsystem_add_ns(client, **params):
     """Add a namespace to a subsystem.
 
     Args:
@@ -468,6 +459,7 @@ def nvmf_subsystem_add_ns(client,
         eui64: 8-byte namespace EUI-64 in hexadecimal (e.g. "ABCDEF0123456789") (optional).
         uuid: Namespace UUID (optional).
         anagrpid: ANA group ID (optional).
+        no_auto_visible: Do not automatically make namespace visible to controllers
 
     Returns:
         The namespace ID
@@ -497,6 +489,13 @@ def nvmf_subsystem_add_ns(client,
 
     if tgt_name:
         params['tgt_name'] = tgt_name
+=======
+    strip_globals(params)
+    apply_defaults(params, tgt_name=None)
+    group_as(params, 'namespace', ['bdev_name', 'ptpl_file', 'nsid',
+                                   'nguid', 'eui64', 'uuid', 'anagrpid', 'no_auto_visible'])
+    remove_null(params)
+>>>>>>> d37555b44 (nvmf: per-host namespace masking)
 
     return client.call('nvmf_subsystem_add_ns', params)
 
@@ -519,6 +518,31 @@ def nvmf_subsystem_remove_ns(client, nqn, nsid, tgt_name=None):
         params['tgt_name'] = tgt_name
 
     return client.call('nvmf_subsystem_remove_ns', params)
+
+
+def nvmf_ns_visible(visible, client, nqn, nsid, host, tgt_name=None):
+    """Set visibility of namespace for a host's controllers
+
+    Args:
+        nqn: Subsystem NQN.
+        nsid: Namespace ID.
+        host: Host NQN to set visibility
+        tgt_name: name of the parent NVMe-oF target (optional).
+
+    Returns:
+        True or False
+    """
+    params = {'nqn': nqn,
+              'nsid': nsid,
+              'host': host}
+
+    if tgt_name:
+        params['tgt_name'] = tgt_name
+
+    if visible:
+        return client.call('nvmf_ns_add_host', params)
+    else:
+        return client.call('nvmf_ns_remove_host', params)
 
 
 def nvmf_subsystem_add_host(client, nqn, host, tgt_name=None, psk=None):

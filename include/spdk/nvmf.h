@@ -552,6 +552,40 @@ struct spdk_nvmf_subsystem *spdk_nvmf_subsystem_get_first(struct spdk_nvmf_tgt *
 struct spdk_nvmf_subsystem *spdk_nvmf_subsystem_get_next(struct spdk_nvmf_subsystem *subsystem);
 
 /**
+ * Make the specified namespace visible to the specified host.
+ *
+ * May only be performed on subsystems in the PAUSED or INACTIVE states.
+ *
+ * \param subsystem Subsystem the namespace belong to.
+ * \param nsid Namespace ID to be made visible.
+ * \param hostnqn The NQN for the host.
+ * \param flags Must be zero (reserved for future use).
+ *
+ * \return 0 on success, or negated errno value on failure.
+ */
+int spdk_nvmf_ns_add_host(struct spdk_nvmf_subsystem *subsystem,
+			  uint32_t nsid,
+			  const char *hostnqn,
+			  uint32_t flags);
+
+/**
+ * Make the specified namespace not visible to the specified host.
+ *
+ * May only be performed on subsystems in the PAUSED or INACTIVE states.
+ *
+ * \param subsystem Subsystem the namespace belong to.
+ * \param nsid Namespace ID to be made not visible.
+ * \param hostnqn The NQN for the host.
+ * \param flags Must be zero (reserved for future use).
+ *
+ * \return 0 on success, or negated errno value on failure.
+ */
+int spdk_nvmf_ns_remove_host(struct spdk_nvmf_subsystem *subsystem,
+			     uint32_t nsid,
+			     const char *hostnqn,
+			     uint32_t flags);
+
+/**
  * Allow the given host NQN to connect to the given subsystem.
  *
  * \param subsystem Subsystem to add host to.
@@ -913,10 +947,26 @@ struct spdk_nvmf_ns_opts {
 	 */
 	uint32_t anagrpid;
 
-	/* Hole at bytes 60-63. */
-	uint8_t reserved60[4];
+	/**
+	 * Do not automatically make namespace visible to controllers
+	 *
+	 * False if not specified
+	 */
+	bool no_auto_visible;
+
+	/* Hole at bytes 61-63. */
+	uint8_t reserved61[3];
+
+	/* Transport specific json values.
+	 *
+	 * If transport specific values provided then json object is valid only at the time
+	 * namespace is being added. It is transport layer responsibility to maintain
+	 * the copy of it or its decoding if required. When \ref spdk_nvmf_ns_get_opts used
+	 * after namespace has been added object becomes invalid.
+	 */
+	const struct spdk_json_val *transport_specific;
 } __attribute__((packed));
-SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_ns_opts) == 64, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_ns_opts) == 72, "Incorrect size");
 
 /**
  * Get default namespace creation options.
