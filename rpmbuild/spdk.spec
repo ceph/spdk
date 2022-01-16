@@ -8,6 +8,9 @@
 %{!?requirements:%define requirements 0}
 %{!?build_requirements:%define build_requirements 0}
 %{!?shared:%define shared 0}
+%{!?rbd:%define rbd 0}
+%{!?libdir:%define libdir /usr/local/lib}
+%{!?vfio_user:%define vfio_user 0}
 
 # Spec metadata
 Name:           spdk
@@ -55,7 +58,11 @@ make clean &>/dev/null || :
 
 %build
 %if %{deps}
-./scripts/pkgdep.sh --docs --pmem --rdma --uring
+_PKGDEP_OPTS="--docs --pmem --rdma --uring"
+%if %{rbd}
+_PKGDEP_OPTS="$_PKGDEP_OPTS --rbd"
+%endif
+./scripts/pkgdep.sh $_PKGDEP_OPTS
 %endif
 
 # Rely mainly on CONFIG
