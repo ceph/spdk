@@ -41,7 +41,7 @@ INSTALL_RDMA=false
 INSTALL_DOCS=false
 INSTALL_LIBURING=false
 
-while getopts 'abdfhipruDR-:' optchar; do
+while getopts 'abdfhipruR-:' optchar; do
 	case "$optchar" in
 		-)
 			case "$OPTARG" in
