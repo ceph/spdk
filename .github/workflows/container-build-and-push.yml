@@ -1,0 +1,109 @@
+name: Container Build and Push
+
+on:
+  push:
+    branches: [ 'ceph-nvmeof' ]
+    tags: [ 'v*.*' ]
+  pull_request:
+    branches: [ 'ceph-nvmeof' ]
+  workflow_dispatch:
+    inputs:
+      OS_RELEASE:
+        description: 'OS Release (UBI/CENTOS)'
+        required: true
+        default: '8'
+        type: choice
+        options:
+        - '8'
+        - '9'
+      pushToRegistry:
+        description: 'Whether to push the resulting image to a registry'
+        required: true
+        default: false
+        type: boolean
+env:
+  # Use docker.io for Docker Hub if empty
+  REGISTRY: ${{ vars.REGISTRY }}
+  # github.repository as <account>/<repo>
+  IMAGE_NAME: ${{ github.repository }}
+  OS_RELEASE: ${{ inputs.OS_RELEASE || '8' }}
+  SPDK_VERSION: 'v23.01'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # This is used to complete the identity challenge
+      # with sigstore/fulcio when running outside of PRs.
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Get tags
+        run: git fetch --tags --no-recurse-submodules origin 
+
+#      # Install the cosign tool except on PR
+#      # https://github.com/sigstore/cosign-installer
+#      - name: Install cosign
+#        if: github.event_name != 'pull_request'
+#        uses: sigstore/cosign-installer@f3c664df7af409cb4873aa5068053ba9d61a57b6 #v2.6.0
+#        with:
+#          cosign-release: 'v1.13.1'
+
+      # Workaround: https://github.com/docker/build-push-action/issues/461
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@f03ac48505955848960e80bbb68046aa35c7b9e7 #v2.4.1
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request' && inputs.pushToRegistry
+        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671 #v4.0.0
+        with:
+          context: .
+          file: ./docker/ubi/Dockerfile
+          build-args: |
+            OS_RELEASE=${{ env.OS_RELEASE }}
+            SPDK_VERSION=${{ env.SPDK_VERSION }}
+          push: ${{ github.event_name != 'pull_request' && inputs.pushToRegistry }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+#      # Sign the resulting Docker image digest except on PRs.
+#      # This will only write to the public Rekor transparency log when the Docker
+#      # repository is public to avoid leaking data.  If you would like to publish
+#      # transparency data even for private images, pass --force to cosign below.
+#      # https://github.com/sigstore/cosign
+#      - name: Sign the published Docker image
+#        if: ${{ github.event_name != 'pull_request' }}
+#        env:
+#          COSIGN_EXPERIMENTAL: "true"
+#        # This step uses the identity token to provision an ephemeral certificate
+#        # against the sigstore community Fulcio instance.
+#        run: echo "${{ steps.meta.outputs.tags }}" | xargs -I {} cosign sign {}@${{ steps.build-and-push.outputs.digest }}
+#
