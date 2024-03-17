@@ -2198,6 +2198,17 @@
       ]
     },
     {
+      "name": "bdev_rbd_wait_for_latest_osdmap",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "Rados cluster object name"
+        }
+      ]
+    },
+    {
       "name": "bdev_rbd_get_clusters_info",
       "params": [
         {
