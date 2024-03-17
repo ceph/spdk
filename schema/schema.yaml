@@ -2453,6 +2453,14 @@ methods:
         type: string
         required: true
         description: Rados cluster object name
+  - name: bdev_rbd_wait_for_latest_osdmap
+    description: This method is available only if SPDK was build with Ceph RBD support.
+    private: true
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Rados cluster object name
   - name: bdev_rbd_get_clusters_info
     description: This method is available only if SPDK was build with Ceph RBD support.
     params:
