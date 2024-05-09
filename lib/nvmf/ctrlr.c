@@ -3021,7 +3021,12 @@ nvmf_ctrlr_identify_active_ns_list(struct spdk_nvmf_subsystem *subsystem,
 
 	for (ns = spdk_nvmf_subsystem_get_first_ns(subsystem); ns != NULL;
 	     ns = spdk_nvmf_subsystem_get_next_ns(subsystem, ns)) {
-		if (ns->opts.nsid <= cmd->nsid || !nvmf_ctrlr_ns_is_visible(ctrlr, ns->opts.nsid)) {
+		/** check namespace is visible */
+		bool visible = true;
+		TAILQ_FOREACH(ctrlr, &subsystem->ctrlrs, link) {
+			visible &= nvmf_ctrlr_ns_is_visible(ctrlr, ns->opts.nsid);
+		}
+		if (ns->opts.nsid <= cmd->nsid || !visible) {
 			continue;
 		}
 
