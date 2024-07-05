@@ -501,6 +501,28 @@ def nvmf_subsystem_add_ns(client,
     return client.call('nvmf_subsystem_add_ns', params)
 
 
+def nvmf_subsystem_set_ns_anagrpid(client, nqn, nsid, anagrpid, tgt_name=None):
+    """Change ANA group ID of a namespace.
+
+    Args:
+        nqn: Subsystem NQN.
+        tgt_name: name of the parent NVMe-oF target (optional).
+        nsid: Namespace ID.
+        anagrpid: ANA group ID.
+
+    Returns:
+        True or False
+    """
+    params = {'nqn': nqn,
+              'nsid': nsid,
+              'anagrpid': anagrpid}
+
+    if tgt_name:
+        params['tgt_name'] = tgt_name
+
+    return client.call('nvmf_subsystem_set_ns_anagrpid', params)
+
+
 def nvmf_subsystem_remove_ns(client, nqn, nsid, tgt_name=None):
     """Remove a existing namespace from a subsystem.
 
