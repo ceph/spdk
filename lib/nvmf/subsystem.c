@@ -2245,7 +2245,7 @@ spdk_nvmf_subsystem_set_ns_ana_group(struct spdk_nvmf_subsystem *subsystem,
 		subsystem->ana_group[transit_anagrpid - 1]++;
 
 		ns->anagrpid = transit_anagrpid;
-		ns->opts.anagrpid = transit_anagrpid;
+		//ns->opts.anagrpid = transit_anagrpid;
 
 		nvmf_subsystem_ns_changed(subsystem, nsid);
 
@@ -2257,7 +2257,7 @@ spdk_nvmf_subsystem_set_ns_ana_group(struct spdk_nvmf_subsystem *subsystem,
 	subsystem->ana_group[anagrpid - 1]++;
 
 	ns->anagrpid = anagrpid;
-	ns->opts.anagrpid = anagrpid;
+	//ns->opts.anagrpid = anagrpid;
 
 	nvmf_subsystem_ns_changed(subsystem, nsid);
 

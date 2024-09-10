@@ -1554,6 +1554,10 @@ poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
 				return -ENOMEM;
 			}
 			ns_info->channel = ch;
+		} else if (ns !=NULL && (ns->anagrpid != ns->opts.anagrpid) ) {
+			ns->opts.anagrpid = ns->anagrpid;
+			ns_changed = true;
+			SPDK_ERRLOG("Send Notification due to ns-ana-change\n");
 		} else if (spdk_uuid_compare(&ns_info->uuid, spdk_bdev_get_uuid(ns->bdev)) != 0) {
 			/* A namespace was here before, but was replaced by a new one. */
 			ns_changed = true;

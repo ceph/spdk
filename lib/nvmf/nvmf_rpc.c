@@ -1726,7 +1726,7 @@ rpc_nvmf_subsystem_set_ns_ana_group(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	rc = spdk_nvmf_subsystem_pause(subsystem, ctx->nsid, nvmf_rpc_ana_group, ctx);
+	rc = spdk_nvmf_subsystem_pause(subsystem, 0, nvmf_rpc_ana_group, ctx);
 	if (rc != 0) {
 		if (rc == -EBUSY) {
 			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,

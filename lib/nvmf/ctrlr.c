@@ -2433,10 +2433,12 @@ nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid)
 	uint16_t i;
 	bool found = false;
 
+	SPDK_ERRLOG("Ctrl Ns changed %d ?\n", nsid);
 	for (i = 0; i < ctrlr->changed_ns_list_count; i++) {
 		if (ctrlr->changed_ns_list.ns_list[i] == nsid) {
 			/* nsid is already in the list */
 			found = true;
+			SPDK_ERRLOG("Ctrl Ns changed %d found\n", nsid);
 			break;
 		}
 	}
@@ -2449,6 +2451,7 @@ nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid)
 				ctrlr->changed_ns_list.ns_list[i] = 0;
 			}
 		} else {
+			SPDK_ERRLOG("Ctrl Ns changed %d do \n", nsid);
 			ctrlr->changed_ns_list.ns_list[ctrlr->changed_ns_list_count++] = nsid;
 		}
 	}
