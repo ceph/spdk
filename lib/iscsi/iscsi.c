@@ -64,7 +64,6 @@
 
 #ifdef __FreeBSD__
 #define HAVE_SRANDOMDEV 1
-#define HAVE_ARC4RANDOM 1
 #endif
 
 struct spdk_iscsi_globals g_iscsi = {
@@ -99,7 +98,7 @@ srandomdev(void)
 }
 #endif /* HAVE_SRANDOMDEV */
 
-#ifndef HAVE_ARC4RANDOM
+#ifndef SPDK_CONFIG_HAVE_ARC4RANDOM
 static int g_arc4random_initialized = 0;
 
 static uint32_t
@@ -117,7 +116,7 @@ arc4random(void)
 	r = (r1 << 16) | r2;
 	return r;
 }
-#endif /* HAVE_ARC4RANDOM */
+#endif /* SPDK_CONFIG_HAVE_ARC4RANDOM */
 
 static void
 gen_random(uint8_t *buf, size_t len)
