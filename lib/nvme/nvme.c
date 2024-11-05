@@ -1413,12 +1413,20 @@ spdk_nvme_transport_id_compare(const struct spdk_nvme_transport_id *trid1,
 
 	switch (trid1->adrfam) {
 	case SPDK_NVMF_ADRFAM_IPV4:
-		if (spdk_net_compare_address(AF_INET, trid1->traddr, trid2->traddr, &cmp) != 0) {
+		if (trid1->trtype == SPDK_NVME_TRANSPORT_TCP &&
+				spdk_net_compare_address(AF_INET, trid1->traddr, "0.0.0.0", &cmp) == 0 && cmp == 0) {
+			/* If the listener uses INADDR_ANY allow all IP addresses */
+		}
+		else if (spdk_net_compare_address(AF_INET, trid1->traddr, trid2->traddr, &cmp) != 0) {
 			return -1;
 		}
 		break;
 	case SPDK_NVMF_ADRFAM_IPV6:
-		if (spdk_net_compare_address(AF_INET6, trid1->traddr, trid2->traddr, &cmp) != 0) {
+		if (trid1->trtype == SPDK_NVME_TRANSPORT_TCP &&
+				spdk_net_compare_address(AF_INET6, trid1->traddr, "::", &cmp) == 0) && cmp == 0 {
+			/* If the listener uses INADDR_ANY allow all IP addresses */
+		}
+		else if (spdk_net_compare_address(AF_INET6, trid1->traddr, trid2->traddr, &cmp) != 0) {
 			return -1;
 		}
 		break;
