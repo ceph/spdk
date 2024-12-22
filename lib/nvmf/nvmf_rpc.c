@@ -1617,6 +1617,118 @@ rpc_nvmf_subsystem_set_ns_ana_group(struct spdk_jsonrpc_request *request,
 SPDK_RPC_REGISTER("nvmf_subsystem_set_ns_ana_group", rpc_nvmf_subsystem_set_ns_ana_group,
 		  SPDK_RPC_RUNTIME)
 
+struct rpc_nvmf_subsystem_set_ns_visibility_ext {
+	struct rpc_nvmf_subsystem_set_ns_visibility_ctx req;
+	bool response_sent;
+};
+
+static const struct spdk_json_object_decoder rpc_nvmf_subsystem_set_ns_visibility_decoders[] = {
+	{"nqn", offsetof(struct rpc_nvmf_subsystem_set_ns_visibility_ctx, nqn), spdk_json_decode_string},
+	{"nsid", offsetof(struct rpc_nvmf_subsystem_set_ns_visibility_ctx, nsid), spdk_json_decode_uint32},
+	{"auto_visible", offsetof(struct rpc_nvmf_subsystem_set_ns_visibility_ctx, auto_visible), spdk_json_decode_bool},
+	{"tgt_name", offsetof(struct rpc_nvmf_subsystem_set_ns_visibility_ctx, tgt_name), spdk_json_decode_string, true},
+};
+
+static void
+free_rpc_nvmf_subsystem_set_ns_visibility_ext(struct rpc_nvmf_subsystem_set_ns_visibility_ext *ereq)
+{
+	free_rpc_nvmf_subsystem_set_ns_visibility(&ereq->req);
+	free(ereq);
+}
+
+static void
+rpc_nvmf_subsystem_set_ns_visibility_resumed(struct spdk_nvmf_subsystem *subsystem,
+			  void *cb_arg, int status)
+{
+	struct rpc_nvmf_subsystem_set_ns_visibility_ext *ereq = cb_arg;
+
+	if (!ereq->response_sent) {
+		spdk_jsonrpc_send_bool_response(ereq->req.request, true);
+	}
+
+	free_rpc_nvmf_subsystem_set_ns_visibility_ext(ereq);
+}
+
+static void
+rpc_nvmf_subsystem_set_ns_visibility_paused(struct spdk_nvmf_subsystem *subsystem,
+		   void *cb_arg, int status)
+{
+	struct rpc_nvmf_subsystem_set_ns_visibility_ext *ereq = cb_arg;
+	struct rpc_nvmf_subsystem_set_ns_visibility_ctx *req = &ereq->req;
+	struct spdk_jsonrpc_request *request = req->request;
+	int rc;
+
+	rc = spdk_nvmf_subsystem_set_ns_visibility(subsystem, req->nsid, req->auto_visible);
+	if (rc != 0) {
+		SPDK_ERRLOG("Unable to change visibility\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		ereq->response_sent = true;
+	}
+
+	if (spdk_nvmf_subsystem_resume(subsystem, rpc_nvmf_subsystem_set_ns_visibility_resumed, ereq)) {
+		if (!ereq->response_sent) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Internal error");
+		}
+		free_rpc_nvmf_subsystem_set_ns_visibility_ext(ereq);
+	}
+}
+
+static void
+rpc_nvmf_subsystem_set_ns_visibility(struct spdk_jsonrpc_request *request,
+				    const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_subsystem_set_ns_visibility_ext *ereq;
+	struct rpc_nvmf_subsystem_set_ns_visibility_ctx *req;
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_tgt *tgt;
+	int rc;
+
+	ereq = calloc(1, sizeof(*ereq));
+	if (!ereq) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		return;
+	}
+	req = &ereq->req;
+
+	if (spdk_json_decode_object(params, rpc_nvmf_subsystem_set_ns_visibility_decoders,
+				    SPDK_COUNTOF(rpc_nvmf_subsystem_set_ns_visibility_decoders), req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		free_rpc_nvmf_subsystem_set_ns_visibility_ext(ereq);
+		return;
+	}
+
+	tgt = spdk_nvmf_get_tgt(req->tgt_name);
+	if (!tgt) {
+		SPDK_ERRLOG("Unable to find a target object.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		free_rpc_nvmf_subsystem_set_ns_visibility_ext(ereq);
+		return;
+	}
+
+	req->request = request;
+	ereq->response_sent = false;
+
+	subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req->nqn);
+	if (!subsystem) {
+		SPDK_ERRLOG("Unable to find subsystem with NQN %s\n", req->nqn);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		free_rpc_nvmf_subsystem_set_ns_visibility_ext(ereq);
+		return;
+	}
+
+	rc = spdk_nvmf_subsystem_pause(subsystem, req->nsid, rpc_nvmf_subsystem_set_ns_visibility_paused, ereq);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
+		free_rpc_nvmf_subsystem_set_ns_visibility_ext(ereq);
+	}
+}
+SPDK_RPC_REGISTER("nvmf_subsystem_set_ns_visibility", rpc_nvmf_subsystem_set_ns_visibility,
+		  SPDK_RPC_RUNTIME)
+
 struct rpc_nvmf_subsystem_remove_ns_ext {
 	struct rpc_nvmf_subsystem_remove_ns_ctx req;
 	bool response_sent;
