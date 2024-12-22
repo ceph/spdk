@@ -4335,6 +4335,34 @@
       ]
     },
     {
+      "name": "nvmf_subsystem_set_ns_visibility",
+      "params": [
+        {
+          "name": "nqn",
+          "type": "string",
+          "required": true,
+          "description": "Subsystem NQN"
+        },
+        {
+          "name": "nsid",
+          "type": "uint32",
+          "required": true,
+          "description": "Namespace ID"
+        },
+        {
+          "name": "auto_visible",
+          "type": "boolean",
+          "required": true,
+          "description": "Namespace will be auto visible"
+        },
+        {
+          "name": "tgt_name",
+          "type": "string",
+          "description": "Parent NVMe-oF target name."
+        }
+      ]
+    },
+    {
       "name": "nvmf_subsystem_add_host",
       "params": [
         {
