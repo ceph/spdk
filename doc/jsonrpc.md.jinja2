@@ -6489,6 +6489,34 @@ Example response:
 }
 ~~~
 
+### nvmf_subsystem_set_ns_visibility {#rpc_nvmf_subsystem_set_ns_visibility}
+
+{{ nvmf_subsystem_set_ns_visibility_description }}
+
+#### Parameters
+
+{{ nvmf_subsystem_set_ns_visibility_params }}
+
+#### Response
+
+{{ nvmf_subsystem_set_ns_visibility_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_subsystem_set_ns_visibility", "nqn.2016-06.io.spdk:cnode1", "1", true) }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ### nvmf_subsystem_add_host {#rpc_nvmf_subsystem_add_host}
 
 {{ nvmf_subsystem_add_host_description }}

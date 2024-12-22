@@ -1372,6 +1372,78 @@ SPDK_RPC_REGISTER("nvmf_subsystem_set_ns_ana_group", rpc_nvmf_subsystem_set_ns_a
 		  SPDK_RPC_RUNTIME)
 
 static void
+rpc_nvmf_subsystem_set_ns_visibility_resumed(struct spdk_nvmf_subsystem *subsystem,
+			  void *cb_arg, int status)
+{
+	struct rpc_nvmf_subsystem_set_ns_visibility_ctx *req = cb_arg;
+
+	if (req->request) {
+		spdk_jsonrpc_send_bool_response(req->request, true);
+	}
+
+	free_rpc_nvmf_subsystem_set_ns_visibility_heap(req);
+}
+
+static void
+rpc_nvmf_subsystem_set_ns_visibility_paused(struct spdk_nvmf_subsystem *subsystem,
+		   void *cb_arg, int status)
+{
+	struct rpc_nvmf_subsystem_set_ns_visibility_ctx *req = cb_arg;
+	struct spdk_jsonrpc_request *request = req->request;
+	int rc;
+
+	rc = spdk_nvmf_subsystem_set_ns_visibility(subsystem, req->nsid, req->auto_visible);
+	if (rc < 0) {
+		SPDK_ERRLOG("Unable to change visibility for namespace ID %u\n", req->nsid);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		req->request = NULL;
+	}
+
+	if (spdk_nvmf_subsystem_resume(subsystem, rpc_nvmf_subsystem_set_ns_visibility_resumed, req)) {
+		if (req->request) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Internal error");
+		}
+		free_rpc_nvmf_subsystem_set_ns_visibility(req);
+		free(req);
+	}
+}
+
+static void
+rpc_nvmf_subsystem_set_ns_visibility(struct spdk_jsonrpc_request *request,
+				    const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_subsystem_set_ns_visibility_ctx *req;
+	struct spdk_nvmf_subsystem *subsystem;
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		return;
+	}
+
+	if (spdk_json_decode_object(params, rpc_nvmf_subsystem_set_ns_visibility_decoders,
+				    SPDK_COUNTOF(rpc_nvmf_subsystem_set_ns_visibility_decoders), req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		free_rpc_nvmf_subsystem_set_ns_visibility(req);
+		free(req);
+		return;
+	}
+
+	req->request = request;
+
+	if (_rpc_nvmf_subsystem_pause(request, req->tgt_name, req->nqn, req->nsid,
+					rpc_nvmf_subsystem_set_ns_visibility_paused, req, NULL, NULL)) {
+		free_rpc_nvmf_subsystem_set_ns_visibility(req);
+		free(req);
+	}
+
+}
+SPDK_RPC_REGISTER("nvmf_subsystem_set_ns_visibility", rpc_nvmf_subsystem_set_ns_visibility, SPDK_RPC_RUNTIME)
+
+static void
 rpc_nvmf_subsystem_remove_ns_resumed(struct spdk_nvmf_subsystem *subsystem,
 				     void *cb_arg, int status)
 {
