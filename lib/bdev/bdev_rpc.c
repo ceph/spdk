@@ -811,7 +811,8 @@ rpc_bdev_set_qos_limit(struct spdk_jsonrpc_request *request,
 	struct rpc_bdev_set_qos_limit_ctx req = {.rw_ios_per_sec = UINT64_MAX,
 		       .rw_mbytes_per_sec = UINT64_MAX,
 		       .r_mbytes_per_sec = UINT64_MAX,
-		       .w_mbytes_per_sec = UINT64_MAX
+		       .w_mbytes_per_sec = UINT64_MAX,
+		       .timeslice_in_usecs = 0,
 	};
 	uint64_t limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
 	struct spdk_bdev_desc *desc;
@@ -850,7 +851,7 @@ rpc_bdev_set_qos_limit(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	spdk_bdev_set_qos_rate_limits(spdk_bdev_desc_get_bdev(desc), limits,
+	spdk_bdev_set_qos_rate_limits(spdk_bdev_desc_get_bdev(desc), limits, req.timeslice_in_usecs,
 				      rpc_bdev_set_qos_limit_complete, request);
 
 	spdk_bdev_close(desc);

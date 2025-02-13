@@ -1459,6 +1459,9 @@ methods:
       - name: w_mbytes_per_sec
         type: uint64
         description: Number of Write megabytes per second to allow. 0 means unlimited.
+      - name: timeslice_in_usecs
+        type: uint64
+        description: QOS time slice, in micro seconds. 0 means use default.
   - name: bdev_set_qd_sampling_period
     description: Enable queue depth tracking on a specified bdev.
     result:
