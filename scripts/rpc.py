@@ -1329,7 +1329,8 @@ if __name__ == "__main__":
                                     rw_ios_per_sec=args.rw_ios_per_sec,
                                     rw_mbytes_per_sec=args.rw_mbytes_per_sec,
                                     r_mbytes_per_sec=args.r_mbytes_per_sec,
-                                    w_mbytes_per_sec=args.w_mbytes_per_sec)
+                                    w_mbytes_per_sec=args.w_mbytes_per_sec,
+                                    timeslice_in_usecs=args.timeslice_in_usecs)
 
     p = subparsers.add_parser('bdev_set_qos_limit',
                               help='Set QoS rate limit on a blockdev')
@@ -1345,6 +1346,9 @@ if __name__ == "__main__":
                    type=int)
     p.add_argument('--w-mbytes-per-sec',
                    help="Write megabytes per second limit (>=1, example: 100). 0 means unlimited.",
+                   type=int)
+    p.add_argument('--timeslice-in-usecs',
+                   help="QOS time slice, in micro seconds. 0 means use default.",
                    type=int)
     p.set_defaults(func=bdev_set_qos_limit)
 
