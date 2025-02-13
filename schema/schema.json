@@ -1360,6 +1360,11 @@
           "name": "w_mbytes_per_sec",
           "type": "uint64",
           "description": "Number of Write megabytes per second to allow. 0 means unlimited."
+        },
+        {
+          "name": "timeslice_in_usecs",
+          "type": "uint64",
+          "description": "QOS timeslice in usecs."
         }
       ]
     },
