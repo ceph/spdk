@@ -53,6 +53,9 @@ int nvmf_transport_qpair_get_listen_trid(struct spdk_nvmf_qpair *qpair,
 void nvmf_transport_qpair_abort_request(struct spdk_nvmf_qpair *qpair,
 					struct spdk_nvmf_request *req);
 
+void nvmf_transport_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
+		struct spdk_nvmf_request *req);
+
 bool nvmf_request_get_buffers_abort(struct spdk_nvmf_request *req,
 				    struct spdk_nvmf_transport_poll_group *group);
 
