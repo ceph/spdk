@@ -4114,6 +4114,7 @@ static const char *g_io_type_strings[] = {
 	[SPDK_BDEV_IO_TYPE_NVME_IOV_MD] = "nvme_iov_md",
 	[SPDK_BDEV_IO_TYPE_NVME_NSSR] = "nvme_nssr",
 	[SPDK_BDEV_IO_TYPE_WRITE_UNCORRECTABLE] = "write_uncorrectable",
+	[SPDK_BDEV_IO_TYPE_IO_CANCEL] = "io_cancel",
 };
 
 const char *
