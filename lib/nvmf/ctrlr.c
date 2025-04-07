@@ -604,6 +604,8 @@ err_qpair_mask:
 	return NULL;
 }
 
+uint32_t host_disconnect_remove_registrants(struct spdk_nvmf_ctrlr *ctrlr);
+
 static void
 _nvmf_ctrlr_destruct(void *ctx)
 {
@@ -623,7 +625,7 @@ _nvmf_ctrlr_destruct(void *ctx)
 		spdk_thread_send_msg(ctrlr->thread, _nvmf_ctrlr_destruct, ctrlr);
 		return;
 	}
-
+	host_disconnect_remove_registrants(ctrlr);
 	nvmf_ctrlr_stop_keep_alive_timer(ctrlr);
 	nvmf_ctrlr_stop_association_timer(ctrlr);
 	spdk_bit_array_free(&ctrlr->qpair_mask);
@@ -2302,6 +2304,7 @@ nvmf_ctrlr_mask_aen(struct spdk_nvmf_ctrlr *ctrlr,
 /* we have to use the typedef in the function declaration to appease astyle. */
 typedef enum spdk_nvme_ana_state spdk_nvme_ana_state_t;
 
+
 static inline spdk_nvme_ana_state_t
 nvmf_ctrlr_get_ana_state(struct spdk_nvmf_ctrlr *ctrlr, uint32_t anagrpid)
 {
@@ -2315,6 +2318,11 @@ nvmf_ctrlr_get_ana_state(struct spdk_nvmf_ctrlr *ctrlr, uint32_t anagrpid)
 
 	assert(anagrpid - 1 < ctrlr->subsys->max_nsid);
 	return ctrlr->listener->ana_state[anagrpid - 1];
+}
+
+bool nvmf_is_ctrl_ana_state_optimized(struct spdk_nvmf_ctrlr *ctrlr, uint32_t anagrpid)
+{
+	return (nvmf_ctrlr_get_ana_state(ctrlr, anagrpid) == SPDK_NVME_ANA_OPTIMIZED_STATE);
 }
 
 static spdk_nvme_ana_state_t

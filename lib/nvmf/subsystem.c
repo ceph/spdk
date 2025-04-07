@@ -25,7 +25,7 @@
 #include "spdk/log.h"
 #include "spdk_internal/utf.h"
 #include "spdk_internal/usdt.h"
-
+#include "nvmf_reservation.h"
 #define MODEL_NUMBER_DEFAULT "SPDK bdev Controller"
 #define NVMF_SUBSYSTEM_DEFAULT_NAMESPACES 32
 
@@ -44,6 +44,8 @@ enum spdk_nvmf_nqn_domain_states {
 };
 
 static int _nvmf_subsystem_destroy(struct spdk_nvmf_subsystem *subsystem);
+static uint32_t
+unmap_host_remove_registrants(struct spdk_nvmf_subsystem	*subsystem , const char *hostnqn);
 
 /* Returns true if is a valid ASCII string as defined by the NVMe spec */
 static bool
@@ -325,6 +327,7 @@ nvmf_host_free(struct spdk_nvmf_host *host)
 static void
 nvmf_subsystem_remove_host(struct spdk_nvmf_subsystem *subsystem, struct spdk_nvmf_host *host)
 {
+	unmap_host_remove_registrants(subsystem , host->nqn);
 	TAILQ_REMOVE(&subsystem->hosts, host, link);
 	nvmf_host_free(host);
 }
@@ -1749,7 +1752,7 @@ nvmf_subsystem_ns_changed(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
 	}
 }
 
-static uint32_t nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns);
+uint32_t nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns);
 
 int
 spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
@@ -2054,7 +2057,7 @@ static int nvmf_ns_reservation_update(const struct spdk_nvmf_ns *ns,
 				      const struct spdk_nvmf_reservation_info *info);
 static int nvmf_ns_reservation_load(const struct spdk_nvmf_ns *ns,
 				    struct spdk_nvmf_reservation_info *info);
-static int nvmf_ns_reservation_restore(struct spdk_nvmf_ns *ns,
+int nvmf_ns_reservation_restore(struct spdk_nvmf_ns *ns,
 				       struct spdk_nvmf_reservation_info *info);
 
 bool
@@ -2619,25 +2622,6 @@ spdk_nvmf_subsystem_get_max_cntlid(const struct spdk_nvmf_subsystem *subsystem)
 	return subsystem->max_cntlid;
 }
 
-struct _nvmf_ns_registrant {
-	uint64_t		rkey;
-	char			*host_uuid;
-};
-
-struct _nvmf_ns_registrants {
-	size_t				num_regs;
-	struct _nvmf_ns_registrant	reg[SPDK_NVMF_MAX_NUM_REGISTRANTS];
-};
-
-struct _nvmf_ns_reservation {
-	bool					ptpl_activated;
-	enum spdk_nvme_reservation_type		rtype;
-	uint64_t				crkey;
-	char					*bdev_uuid;
-	char					*holder_uuid;
-	struct _nvmf_ns_registrants		regs;
-};
-
 static const struct spdk_json_object_decoder nvmf_ns_pr_reg_decoders[] = {
 	{"rkey", offsetof(struct _nvmf_ns_registrant, rkey), spdk_json_decode_uint64},
 	{"host_uuid", offsetof(struct _nvmf_ns_registrant, host_uuid), spdk_json_decode_string},
@@ -2756,7 +2740,7 @@ exit:
 
 static bool nvmf_ns_reservation_all_registrants_type(struct spdk_nvmf_ns *ns);
 
-static int
+int
 nvmf_ns_reservation_restore(struct spdk_nvmf_ns *ns, struct spdk_nvmf_reservation_info *info)
 {
 	uint32_t i;
@@ -3133,7 +3117,7 @@ nvmf_ns_reservation_remove_all_other_registrants(struct spdk_nvmf_ns *ns,
 	return count;
 }
 
-static uint32_t
+uint32_t
 nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns)
 {
 	struct spdk_nvmf_registrant *reg, *reg_tmp;
@@ -3144,6 +3128,116 @@ nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns)
 		count++;
 	}
 	return count;
+}
+
+#define HOSTID_LEN 16
+
+/* Convert a hex character to a nibble */
+int hexchar_to_int(char c) {
+	if ('0' <= c && c <= '9') return c - '0';
+	if ('a' <= c && c <= 'f') return c - 'a' + 10;
+	if ('A' <= c && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/* Convert UUID string (e.g., "abcd1234-5678-9abc-def0-1234567890ab") to 16-byte array */
+int parse_uuid_string(const char *uuid_str, uint8_t hostid[HOSTID_LEN]) {
+	int uuid_len = strlen(uuid_str);
+	int idx = 0;
+
+	for (int i = 0; i < uuid_len && idx < HOSTID_LEN; ) {
+		/* skip dashes */
+		if (uuid_str[i] == '-') {
+			i++;
+			continue;
+		}
+		int high = hexchar_to_int(uuid_str[i++]);
+		if (high < 0 || i >= uuid_len) return -1;
+
+		int low = hexchar_to_int(uuid_str[i++]);
+		if (low < 0) return -1;
+
+		hostid[idx++] = (uint8_t)((high << 4) | low);
+	}
+	return (idx == HOSTID_LEN) ? 0 : -1;
+}
+
+/* Extract UUID part from host NQN and convert to 16-byte hostid */
+int extract_hostid_from_hostnqn(const char *nqn, uint8_t *hostid) {
+	const char *uuid_prefix = "uuid:";
+	char *uuid_start = strstr(nqn, uuid_prefix);
+	if (!uuid_start) {
+		fprintf(stderr, "UUID prefix not found in NQN\n");
+		return -1;
+	}
+	uuid_start += strlen(uuid_prefix);
+	return parse_uuid_string(uuid_start, hostid);
+}
+
+static uint32_t
+unmap_host_remove_registrants(struct spdk_nvmf_subsystem	*subsystem , const char *hostnqn) {
+	struct spdk_nvmf_ctrlr *ctrlr;
+	bool found_ctrlr = false;
+	struct spdk_nvmf_ns *ns;
+	uint32_t i;
+	uint8_t hostid[HOSTID_LEN];
+
+	TAILQ_FOREACH(ctrlr, &subsystem->ctrlrs, link) {
+		if (strcmp(ctrlr->hostnqn, hostnqn) == 0) {
+			found_ctrlr = true;
+			/* reservation info would be removed upon host disconnect */
+			break;
+		}
+	}
+	SPDK_ERRLOG("unmap host %s found ctrlr %d\n", hostnqn, found_ctrlr);
+	if (!found_ctrlr) {
+		int rc = extract_hostid_from_hostnqn(hostnqn, hostid);
+		if(rc != 0) {
+			SPDK_ERRLOG("hostid-from-hostnqn result %d\n", rc);
+			return rc;
+		}
+		SPDK_ERRLOG("hostid-from-hostnqn first 8 bytes hostid %x%x%x%x%x%x%x%x\n", hostid[0], hostid[1],
+					hostid[2], hostid[3], hostid[4], hostid[5], hostid[6], hostid[7]);
+		for (i = 0; i < subsystem->max_nsid; i++) {
+			ns = subsystem->ns[i];
+			if (ns && ns->bdev) {
+			/* if host is registrant for ns remove  it */
+				struct spdk_nvmf_registrant *reg =
+					nvmf_ns_reservation_get_registrant(ns, hostid);
+				if (reg) {
+					SPDK_INFOLOG(reservation,"Removing  host %s from registration db of NS %d\n", hostnqn, ns->nsid);
+					nvmf_ns_reservation_remove_registrant(ns, reg);
+					nvmf_ns_update_reservation_info(ns);
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+bool nvmf_is_ctrl_ana_state_optimized(struct spdk_nvmf_ctrlr *ctrlr, uint32_t anagrpid);
+
+uint32_t
+host_disconnect_remove_registrants(struct spdk_nvmf_ctrlr *ctrlr) {
+	struct spdk_nvmf_ns *ns;
+	uint32_t i;
+	/* This function is called from subsystem thread so it can safely access subsystem reservation functions */
+	struct spdk_nvmf_subsystem	*subsystem =  ctrlr->subsys;
+	if (!spdk_nvmf_subsystem_host_allowed(subsystem, ctrlr->hostnqn)) {
+		for (i = 0; i < subsystem->max_nsid; i++) {
+			ns = subsystem->ns[i];
+			if ( ns && ns->bdev && nvmf_is_ctrl_ana_state_optimized(ctrlr, ns->anagrpid) ) {
+			/* if host is registrant for ns remove  it */
+				struct spdk_nvmf_registrant *reg =
+					nvmf_ns_reservation_get_registrant(ns, &ctrlr->hostid);
+				if (reg) {
+					SPDK_INFOLOG(reservation,"Disconnect ctrlr: Removing  host %s from registration db of NS %d\n", ctrlr->hostnqn, ns->nsid);
+					nvmf_ns_reservation_remove_registrant(ns, reg);
+					nvmf_ns_update_reservation_info(ns);
+				}
+			}
+		}
+	}
 }
 
 static void
