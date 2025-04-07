@@ -604,6 +604,7 @@ err_qpair_mask:
 	return NULL;
 }
 
+
 static void
 _nvmf_ctrlr_destruct(void *ctx)
 {
@@ -623,7 +624,6 @@ _nvmf_ctrlr_destruct(void *ctx)
 		spdk_thread_send_msg(ctrlr->thread, _nvmf_ctrlr_destruct, ctrlr);
 		return;
 	}
-
 	nvmf_ctrlr_stop_keep_alive_timer(ctrlr);
 	nvmf_ctrlr_stop_association_timer(ctrlr);
 	spdk_bit_array_free(&ctrlr->qpair_mask);
@@ -2301,6 +2301,7 @@ nvmf_ctrlr_mask_aen(struct spdk_nvmf_ctrlr *ctrlr,
 
 /* we have to use the typedef in the function declaration to appease astyle. */
 typedef enum spdk_nvme_ana_state spdk_nvme_ana_state_t;
+
 
 static inline spdk_nvme_ana_state_t
 nvmf_ctrlr_get_ana_state(struct spdk_nvmf_ctrlr *ctrlr, uint32_t anagrpid)
