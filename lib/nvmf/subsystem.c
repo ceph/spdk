@@ -25,7 +25,7 @@
 #include "spdk/log.h"
 #include "spdk_internal/utf.h"
 #include "spdk_internal/usdt.h"
-
+#include "nvmf_reservation.h"
 #define MODEL_NUMBER_DEFAULT "SPDK bdev Controller"
 #define NVMF_SUBSYSTEM_DEFAULT_NAMESPACES 32
 
@@ -1749,7 +1749,7 @@ nvmf_subsystem_ns_changed(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
 	}
 }
 
-static uint32_t nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns);
+uint32_t nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns);
 
 int
 spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
@@ -2052,7 +2052,7 @@ static int nvmf_ns_reservation_update(const struct spdk_nvmf_ns *ns,
 				      const struct spdk_nvmf_reservation_info *info);
 static int nvmf_ns_reservation_load(const struct spdk_nvmf_ns *ns,
 				    struct spdk_nvmf_reservation_info *info);
-static int nvmf_ns_reservation_restore(struct spdk_nvmf_ns *ns,
+int nvmf_ns_reservation_restore(struct spdk_nvmf_ns *ns,
 				       struct spdk_nvmf_reservation_info *info);
 
 bool
@@ -2665,25 +2665,6 @@ spdk_nvmf_subsystem_get_max_cntlid(const struct spdk_nvmf_subsystem *subsystem)
 	return subsystem->max_cntlid;
 }
 
-struct _nvmf_ns_registrant {
-	uint64_t		rkey;
-	char			*host_uuid;
-};
-
-struct _nvmf_ns_registrants {
-	size_t				num_regs;
-	struct _nvmf_ns_registrant	reg[SPDK_NVMF_MAX_NUM_REGISTRANTS];
-};
-
-struct _nvmf_ns_reservation {
-	bool					ptpl_activated;
-	enum spdk_nvme_reservation_type		rtype;
-	uint64_t				crkey;
-	char					*bdev_uuid;
-	char					*holder_uuid;
-	struct _nvmf_ns_registrants		regs;
-};
-
 static const struct spdk_json_object_decoder nvmf_ns_pr_reg_decoders[] = {
 	{"rkey", offsetof(struct _nvmf_ns_registrant, rkey), spdk_json_decode_uint64},
 	{"host_uuid", offsetof(struct _nvmf_ns_registrant, host_uuid), spdk_json_decode_string},
@@ -2802,7 +2783,7 @@ exit:
 
 static bool nvmf_ns_reservation_all_registrants_type(struct spdk_nvmf_ns *ns);
 
-static int
+int
 nvmf_ns_reservation_restore(struct spdk_nvmf_ns *ns, struct spdk_nvmf_reservation_info *info)
 {
 	uint32_t i;
@@ -3179,7 +3160,7 @@ nvmf_ns_reservation_remove_all_other_registrants(struct spdk_nvmf_ns *ns,
 	return count;
 }
 
-static uint32_t
+uint32_t
 nvmf_ns_reservation_clear_all_registrants(struct spdk_nvmf_ns *ns)
 {
 	struct spdk_nvmf_registrant *reg, *reg_tmp;
