@@ -373,6 +373,17 @@ struct spdk_bdev_fn_table {
 
 	/** Check if bdev can handle spdk_accel_sequence to handle I/O of specific type. */
 	bool (*accel_sequence_supported)(void *ctx, enum spdk_bdev_io_type type);
+	/* functions for implementation  of reservation */
+	int  (*ns_reservation_update_json)(struct spdk_bdev *bdev , struct spdk_json_write_ctx **ctx);
+
+	int (*ns_reservation_load_json)(struct spdk_bdev *bdev, void **json, int *json_size);
+
+	/**
+	 * if ptpl is enabled then passed subsystem's cbk function: in case backend has reservation
+	 * notifications that should be loaded it calls cbk(ns)
+	 **/
+	bool (*ns_reservation_is_ptpl_enabled) (struct spdk_bdev *bdev , void *ns,int (*cbk)(void *ns));
+	void (*ns_reservation_increment_epoch) (struct spdk_bdev *bdev);
 };
 
 /** bdev I/O completion status */
