@@ -4059,6 +4059,7 @@ nvmf_ctrlr_async_event_notification(struct spdk_nvmf_ctrlr *ctrlr,
 	 * response.
 	 */
 	if (ctrlr->nr_aer_reqs == 0) {
+		SPDK_ERRLOG("Try to send notification on subs %s no aen-request - pending \n", ctrlr->subsys->subnqn);
 		nvmf_ctrlr_queue_pending_async_event(ctrlr, event);
 		return 0;
 	}
@@ -4120,12 +4121,14 @@ void
 nvmf_ctrlr_async_event_reservation_notification(struct spdk_nvmf_ctrlr *ctrlr)
 {
 	union spdk_nvme_async_event_completion event = {0};
-
+	SPDK_ERRLOG("Try to send ANA notification on subs %s.\n", ctrlr->subsys->subnqn);
 	if (!ctrlr->num_avail_log_pages) {
+		SPDK_ERRLOG("Try to send ANA notification on subs %s. no log pages\n", ctrlr->subsys->subnqn);
 		return;
 	}
 
 	if (!nvmf_ctrlr_mask_aen(ctrlr, SPDK_NVME_ASYNC_EVENT_RESERVATION_LOG_AVAIL_MASK_BIT)) {
+		SPDK_ERRLOG("Try to send ANA notification on subs %s no aen-mask \n", ctrlr->subsys->subnqn);
 		return;
 	}
 
