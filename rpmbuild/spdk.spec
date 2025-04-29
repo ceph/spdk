@@ -85,6 +85,9 @@ _PKGDEP_OPTS="$_PKGDEP_OPTS --rbd"
 
 # Rely mainly on CONFIG
 #git submodule update --init
+echo downgrade meson to 1.7.2
+pip uninstall -y meson
+pip install meson==1.7.2
 ./configure --disable-unit-tests --disable-tests %{configure}
 make %{make}
 make DESTDIR=%{buildroot} install %{make}
