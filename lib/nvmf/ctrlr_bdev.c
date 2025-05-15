@@ -348,14 +348,14 @@ nvmf_bdev_ctrlr_io_cancel_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *des
 	cpl->num_deferred = 0;
 	bool qp_found = false;
 	int rc = 0;
-	if (!spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_IO_CANCEL)) {
+	if (bdev && !spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_IO_CANCEL)) {
 			response->status.sct = SPDK_NVME_SCT_GENERIC;
 			response->status.sc = SPDK_NVME_SC_SUCCESS;
 			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
-	SPDK_ERRLOG("IO cancel command started: action %d cid %d , qid %d\n",action, cid, sqid);
+	SPDK_INFOLOG(io_cancel, "IO cancel command started: action %d cid %d , qid %d\n",action, cid, sqid);
 	TAILQ_FOREACH(qpair, &group->qpairs, link) {
-		SPDK_ERRLOG("IO cancel command found : qid %d, ctrl %p, req->ctrl %p\n", qpair->qid, qpair->ctrlr, req->qpair->ctrlr);
+		SPDK_INFOLOG(io_cancel, "IO cancel command found : qid %d, ctrl %p, req->ctrl %p\n", qpair->qid, qpair->ctrlr, req->qpair->ctrlr);
 		if (qpair->ctrlr == req->qpair->ctrlr && qpair->qid == sqid) {
 			/* Found the qpair */
 			nvmf_transport_qpair_io_cancel_request(qpair, req);
@@ -364,7 +364,7 @@ nvmf_bdev_ctrlr_io_cancel_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *des
 		}
 	}
 	if(!qp_found) {
-		SPDK_ERRLOG("IO cancel command completed Invalid field: action %d cid %d , qid %d  qp-pair not found\n",action, cid, sqid);
+		SPDK_INFOLOG(io_cancel, "IO cancel command completed Invalid field: action %d cid %d , qid %d  qp-pair not found\n",action, cid, sqid);
 		response->status.sct = SPDK_NVME_SCT_GENERIC;
 		response->status.sc = SPDK_NVME_SC_INVALID_FIELD;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
@@ -951,10 +951,10 @@ nvmf_bdev_ctrlr_complete_io_cancel_cmd(struct spdk_bdev_io *bdev_io, bool succes
 {
 	// Asynchronous completion of cancelled command:
 	if (success) {
-		SPDK_ERRLOG("IO cancel :deferred IO command aborted by lower layer\n");
+		SPDK_INFOLOG(io_cancel, "IO cancel :deferred IO command aborted by lower layer\n");
 	}
 	else {
-		SPDK_ERRLOG("IO cancel :deffered IO command  was not aborted by lower layer\n");
+		SPDK_INFOLOG(io_cancel, "IO cancel :deffered IO command  was not aborted by lower layer\n");
 	}
 	spdk_bdev_free_io(bdev_io);
 }
@@ -994,7 +994,7 @@ spdk_nvmf_bdev_ctrlr_io_cancel_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc
 	}
 	rc = spdk_bdev_abort(desc, ch, req_to_abort, nvmf_bdev_ctrlr_complete_io_cancel_cmd, req);
 	if (spdk_likely(rc == 0)) {
-		SPDK_ERRLOG("IO cancel :IO command request to abort: qid %d, rc %d \n", req_to_abort->qpair->qid, rc);
+		SPDK_INFOLOG(io_cancel, "IO cancel :IO command request to abort: qid %d, rc %d \n", req_to_abort->qpair->qid, rc);
 		cpl->num_deferred ++;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS;
 	} else if (rc == -ENOMEM) {
@@ -1003,7 +1003,7 @@ spdk_nvmf_bdev_ctrlr_io_cancel_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc
 		cpl->num_deferred ++;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	} else {
-		SPDK_ERRLOG("IO cancel :IO command request to abort: qid %d,  rc %d\n", req_to_abort->qpair->qid, rc);
+		SPDK_INFOLOG(io_cancel, "IO cancel :IO command request to abort: qid %d,  rc %d\n", req_to_abort->qpair->qid, rc);
 		cpl->num_deferred ++;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}

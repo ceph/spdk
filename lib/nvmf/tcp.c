@@ -3740,7 +3740,7 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 			// Set status
 			response->status.sct = SPDK_NVME_SCT_GENERIC;
 			response->status.sc = SPDK_NVME_SC_INVALID_FIELD;
-			SPDK_ERRLOG("IO cancel completed: action %d, bad status %d\n",
+			SPDK_INFOLOG(io_cancel, "IO cancel completed: action %d, bad status %d\n",
 					action, response->status.sc);
 			return;
 		}
@@ -3757,7 +3757,7 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 				if (tcp_req_to_abort == NULL) {
 					response->status.sct = SPDK_NVME_SCT_GENERIC;
 					response->status.sc = SPDK_NVME_SC_INVALID_FIELD;
-					SPDK_ERRLOG("IO cancel completed: action %d, bad status %d\n",
+					SPDK_INFOLOG(io_cancel, "IO cancel completed: action %d, bad status %d\n",
 									action, response->status.sc);
 					return;
 				}
@@ -3768,7 +3768,7 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 			}
 		}
 	}
-	SPDK_ERRLOG("IO cancel completed: action %d, num aborted %d, num deferred %d\n",
+	SPDK_INFOLOG(io_cancel, "IO cancel completed: action %d, num aborted %d, num deferred %d\n",
 			action, cpl->num_aborted, cpl->num_deferred);
 }
 
