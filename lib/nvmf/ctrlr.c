@@ -1981,6 +1981,13 @@ nvmf_ctrlr_set_features_host_behavior_support(struct spdk_nvmf_request *req)
 	}
 
 	host_behavior = (struct spdk_nvme_host_behavior *)req->iov[0].iov_base;
+	struct spdk_nvme_host_behavior dummy_host_behavior = {0};
+	if (memcmp(host_behavior->reserved, dummy_host_behavior.reserved, sizeof(host_behavior->reserved)) != 0){
+	        SPDK_ERRLOG("Host Behavior Support invalid reserved field\n");
+                response->status.sct = SPDK_NVME_SCT_GENERIC;
+                response->status.sc = SPDK_NVME_SC_INVALID_FIELD;
+                return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
 	if (host_behavior->acre == 0) {
 		ctrlr->acre_enabled = false;
 	} else if (host_behavior->acre == 1) {
