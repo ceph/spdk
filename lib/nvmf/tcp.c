@@ -3745,9 +3745,9 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 			return;
 		}
 
-		req->req_to_abort = &tcp_req_to_abort->req;// TODO understand  the meaning of poller
+		req->req_to_abort = &tcp_req_to_abort->req;
 		req->timeout_tsc = spdk_get_ticks() + transport->opts.abort_timeout_sec * spdk_get_ticks_hz();
-		req->poller = NULL;
+		req->poller = NULL;//TODO understand why need to set NULL
 		_nvmf_tcp_qpair_abort_request(req);
 	}
 	else { // Cancel multiple IOs
@@ -3761,9 +3761,9 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 									action, response->status.sc);
 					return;
 				}
-				req->req_to_abort = &tcp_req_to_abort->req;// TODO understand  the meaning of poller
+				req->req_to_abort = &tcp_req_to_abort->req;
 				req->timeout_tsc = spdk_get_ticks() + transport->opts.abort_timeout_sec * spdk_get_ticks_hz();
-				req->poller = NULL;
+				req->poller = NULL;//TODO same
 				_nvmf_tcp_qpair_abort_request(req);
 			}
 		}

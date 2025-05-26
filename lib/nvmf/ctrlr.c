@@ -4554,7 +4554,7 @@ nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 	}
 	if(cmd->opc == SPDK_NVME_OPC_IO_CANCEL && req->cmd->nvme_cmd.nsid == SPDK_NVME_GLOBAL_NS_TAG){
 		SPDK_INFOLOG(io_cancel, "IO cancel command arrived with wild-card NS:\n");
-		return nvmf_bdev_ctrlr_io_cancel_cmd(NULL,NULL,NULL, req);
+		return nvmf_bdev_ctrlr_io_cancel_cmd(NULL, req);
 	}
 	ns = nvmf_ctrlr_get_ns(ctrlr, nsid);
 	if (spdk_unlikely(ns == NULL || ns->bdev == NULL)) {
@@ -4658,7 +4658,7 @@ nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 			return nvmf_bdev_ctrlr_copy_cmd(bdev, desc, ch, req);
 		case SPDK_NVME_OPC_IO_CANCEL:
 			SPDK_INFOLOG(io_cancel, "IO cancel command arrived with single NS\n");
-			return nvmf_bdev_ctrlr_io_cancel_cmd(bdev,NULL,NULL, req);
+			return nvmf_bdev_ctrlr_io_cancel_cmd(bdev, req);
 		default:
 			if (spdk_unlikely(qpair->transport->opts.disable_command_passthru)) {
 				goto invalid_opcode;
@@ -4961,7 +4961,6 @@ spdk_nvmf_request_exec(struct spdk_nvmf_request *req)
 	struct spdk_nvmf_qpair *qpair = req->qpair;
 	enum spdk_nvmf_request_exec_status status;
 	struct spdk_nvme_cmd *cmd = &req->cmd->nvme_cmd;
-    //if(cmd->opc == SPDK_NVME_OPC_IO_CANCEL && !nvmf_qpair_is_admin_queue(qpair)) SPDK_ERRLOG("IO cancel command arrived 0:\n");
 	if( (!(cmd->opc == SPDK_NVME_OPC_IO_CANCEL && req->cmd->nvme_cmd.nsid == SPDK_NVME_GLOBAL_NS_TAG)) ||
 			nvmf_qpair_is_admin_queue(qpair)) {
 		if (spdk_unlikely(!nvmf_check_subsystem_active(req))) { // Need to avoid this  check for io-cancel with ns_id == 0xffff ffff
@@ -4983,12 +4982,7 @@ spdk_nvmf_request_exec(struct spdk_nvmf_request *req)
 	} else if (spdk_unlikely(nvmf_qpair_is_admin_queue(qpair))) {
 		status = nvmf_ctrlr_process_admin_cmd(req);
 	} else {
-		/*if(cmd->opc == SPDK_NVME_OPC_IO_CANCEL){
-			SPDK_ERRLOG("IO cancel command arrived 1:\n");
-			status = nvmf_bdev_ctrlr_io_cancel_cmd(NULL, NULL, NULL, req);//TODO need to send only valid parameters
-		}
-		else*/
-			status = nvmf_ctrlr_process_io_cmd(req);
+		status = nvmf_ctrlr_process_io_cmd(req);
 	}
 
 	if (status == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE) {
