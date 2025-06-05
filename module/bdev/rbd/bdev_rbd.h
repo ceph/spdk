@@ -49,6 +49,14 @@ void bdev_rbd_delete(const char *name, spdk_delete_rbd_complete cb_fn,
 int bdev_rbd_resize(const char *name, const uint64_t new_size_in_mb);
 
 /**
+ * Reopen rbd bdev.
+ *
+ * \param bdev Name of rbd bdev.
+ * \param read_only Whether the bdev should be reopened as read-only or read-write.
+ */
+int bdev_rbd_reopen(const char *name, bool read_only);
+
+/**
  * Create a Rados cluster.
  *
  * \param info the info to register the Rados cluster object

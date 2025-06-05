@@ -1182,6 +1182,18 @@ def bdev_rbd_resize(client, name, new_size):
     return client.call('bdev_rbd_resize', params)
 
 
+def bdev_rbd_reopen(client, name, read_only):
+    """Reopen rbd bdev as read-only or read-write.
+    Args:
+        name: name of rbd bdev to reopen
+        read_only: should the bdev be reopened as read-only
+    """
+    params = dict()
+    params['name'] = name
+    params['read_only'] = read_only
+    return client.call('bdev_rbd_reopen', params)
+
+
 def bdev_error_create(client, base_name, uuid=None):
     """Construct an error injection block device.
     Args:

@@ -1144,6 +1144,18 @@ if __name__ == "__main__":
     p.add_argument('new_size', help='new bdev size for resize operation. The unit is MiB')
     p.set_defaults(func=bdev_rbd_resize)
 
+    def bdev_rbd_reopen(args):
+        read_only = True if args.mode == "read-only" else False
+        rpc.bdev.bdev_rbd_reopen(args.client,
+                                 name=args.name,
+                                 read_only=read_only)
+
+    p = subparsers.add_parser('bdev_rbd_reopen', help='Reopen a rbd bdev as read-only or read-write')
+    p.add_argument('name', help='rbd bdev name')
+    p.add_argument('mode', choices=['read-only', 'read-write'],
+                   help='rbd image new mode, read-only or read-write')
+    p.set_defaults(func=bdev_rbd_reopen)
+
     def bdev_delay_create(args):
         print_json(rpc.bdev.bdev_delay_create(args.client,
                                               base_bdev_name=args.base_bdev_name,

@@ -60,6 +60,7 @@ struct bdev_rbd {
 	struct spdk_bdev_io *reset_bdev_io;
 
 	uint64_t rbd_watch_handle;
+	bool rbd_read_only;
 };
 
 struct bdev_rbd_io_channel {
@@ -437,7 +438,14 @@ bdev_rbd_init_context(void *arg)
 	}
 
 	assert(io_ctx != NULL);
-	rc = rbd_open(*io_ctx, rbd->rbd_name, &rbd->image, NULL);
+	if (rbd->rbd_read_only) {
+		SPDK_NOTICELOG("Will open RBD image %s/%s as read-only\n", rbd->pool_name, rbd->rbd_name);
+		rc = rbd_open_read_only(*io_ctx, rbd->rbd_name, &rbd->image, NULL);
+	}
+	else {
+		SPDK_NOTICELOG("Will open RBD image %s/%s as read-write\n", rbd->pool_name, rbd->rbd_name);
+		rc = rbd_open(*io_ctx, rbd->rbd_name, &rbd->image, NULL);
+	}
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to open specified rbd device\n");
 		return NULL;
@@ -823,6 +831,26 @@ bdev_rbd_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	}
 }
 
+static bool
+bdev_rbd_io_type_supported_read_only(void *ctx, enum spdk_bdev_io_type io_type)
+{
+	switch (io_type) {
+	case SPDK_BDEV_IO_TYPE_READ:
+	case SPDK_BDEV_IO_TYPE_UNMAP:
+	case SPDK_BDEV_IO_TYPE_FLUSH:
+	case SPDK_BDEV_IO_TYPE_RESET:
+		return true;
+
+	case SPDK_BDEV_IO_TYPE_WRITE:
+	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
+#ifdef LIBRBD_SUPPORTS_COMPARE_AND_WRITE_IOVEC
+	case SPDK_BDEV_IO_TYPE_COMPARE_AND_WRITE:
+#endif
+	default:
+		return false;
+	}
+}
+
 static int
 bdev_rbd_create_cb(void *io_device, void *ctx_buf)
 {
@@ -1124,6 +1152,15 @@ static const struct spdk_bdev_fn_table rbd_fn_table = {
 	.write_config_json	= bdev_rbd_write_config_json,
 };
 
+static const struct spdk_bdev_fn_table rbd_read_only_fn_table = {
+	.destruct		= bdev_rbd_destruct,
+	.submit_request		= bdev_rbd_submit_request,
+	.io_type_supported	= bdev_rbd_io_type_supported_read_only,
+	.get_io_channel		= bdev_rbd_get_io_channel,
+	.dump_info_json		= bdev_rbd_dump_info_json,
+	.write_config_json	= bdev_rbd_write_config_json,
+};
+
 static int
 rbd_thread_set_cpumask(struct spdk_cpuset *set)
 {
@@ -1417,6 +1454,21 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		return -ENOMEM;
 	}
 
+	rbd->rbd_read_only = false;
+	if (rbd->config) {
+		int i;
+		for (i = 0; rbd->config[i]; i++) {
+			if (strcasecmp(rbd->config[i], "read-only") == 0) {
+				if (!rbd->config[i + 1])
+					continue;
+				if (strcasecmp(rbd->config[i = 1], "yes") == 0 || strcasecmp(rbd->config[i = 1], "true") == 0) {
+					rbd->rbd_read_only = true;
+					break;
+				}
+			}
+		}
+	}
+
 	ret = bdev_rbd_init(rbd);
 	if (ret < 0) {
 		bdev_rbd_free(rbd);
@@ -1441,7 +1493,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 	rbd->disk.blocklen = block_size;
 	rbd->disk.blockcnt = rbd->info.size / rbd->disk.blocklen;
 	rbd->disk.ctxt = rbd;
-	rbd->disk.fn_table = &rbd_fn_table;
+	rbd->disk.fn_table = rbd->rbd_read_only ? &rbd_read_only_fn_table : &rbd_fn_table;
 	rbd->disk.module = &rbd_if;
 
 	SPDK_NOTICELOG("Add %s rbd disk to lun\n", rbd->disk.name);
@@ -1531,6 +1583,66 @@ bdev_rbd_resize(const char *name, const uint64_t new_size_in_mb)
 	if (rc != 0) {
 		SPDK_ERRLOG("failed to notify block cnt change.\n");
 	}
+
+exit:
+	spdk_bdev_close(desc);
+	return rc;
+}
+
+int
+bdev_rbd_reopen(const char *name, bool read_only)
+{
+	struct spdk_bdev_desc *desc;
+	struct spdk_bdev *bdev;
+	struct bdev_rbd *rbd;
+	int rc = 0;
+	const char *ro_str = read_only ? "read-only" : "read-write";
+	rados_ioctx_t *io_ctx = NULL;
+
+	rc = spdk_bdev_open_ext(name, false, dummy_bdev_event_cb, NULL, &desc);
+	if (rc != 0) {
+		return rc;
+	}
+
+	bdev = spdk_bdev_desc_get_bdev(desc);
+
+	if (bdev->module != &rbd_if) {
+		rc = -EINVAL;
+		goto exit;
+	}
+
+	rbd = SPDK_CONTAINEROF(bdev, struct bdev_rbd, disk);
+	assert(rbd != NULL);
+
+	if (rbd->cluster_name) {
+		io_ctx = &rbd->rados_ctx.ctx->io_ctx;
+	} else {
+		io_ctx = &rbd->rados_ctx.io_ctx;
+	}
+	assert(io_ctx != NULL);
+
+	if (rbd->rbd_read_only == read_only) {
+		SPDK_INFOLOG(bdev_rbd, "%s/%s is already %s, nothing to do\n", rbd->pool_name, rbd->rbd_name, ro_str);
+		goto exit;
+	}
+
+	rbd_close(rbd->image);
+	rbd->image = NULL;
+	SPDK_DEBUGLOG(bdev_rbd, "will reopen image %s/%s as %s\n", rbd->pool_name, rbd->rbd_name, ro_str);
+	if (read_only) {
+		SPDK_NOTICELOG("Will open RBD image %s/%s as read-only\n", rbd->pool_name, rbd->rbd_name);
+		rc = rbd_open_read_only(*io_ctx, rbd->rbd_name, &rbd->image, NULL);
+	}
+	else {
+		SPDK_NOTICELOG("Will open RBD image %s/%s as read-write\n", rbd->pool_name, rbd->rbd_name);
+		rc = rbd_open(*io_ctx, rbd->rbd_name, &rbd->image, NULL);
+	}
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed to reopen specified rbd device %s/%s as %s\n", rbd->pool_name, rbd->rbd_name, ro_str);
+		goto exit;
+	}
+	rbd->rbd_read_only = read_only;
+	rbd->disk.fn_table = rbd->rbd_read_only ? &rbd_read_only_fn_table : &rbd_fn_table;
 
 exit:
 	spdk_bdev_close(desc);

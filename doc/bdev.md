@@ -95,6 +95,12 @@ To resize a bdev use the bdev_rbd_resize command.
 
 This command will resize the Rbd0 bdev to 4096 MiB.
 
+To reopen a bdev as read-only or read-write use the bdev_rbd_reopen command.
+
+`rpc.py bdev_rbd_reopen Rbd1 read-only`
+
+This command will reopen the Rbd1 bdev as read only. If it's already read only, nothing will be done.
+
 ## Compression Virtual Bdev Module {#bdev_config_compress}
 
 The compression bdev module can be configured to provide compression/decompression
