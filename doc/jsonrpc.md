@@ -5410,6 +5410,7 @@ block_size              | Required | number      | Block size
 config                  | Optional | string map  | Explicit librados configuration
 cluster_name            | Optional | string      | Rados cluster object name created in this module.
 uuid                    | Optional | string      | UUID of new bdev
+readonly                | Optional | boolean     | set rbd bdev as read-only
 
 If no config is specified, Ceph configuration files must exist with
 all relevant settings for accessing the pool. If a config map is
@@ -5563,49 +5564,6 @@ Example request:
   },
   "jsonrpc": "2.0",
   "method": "bdev_rbd_resize",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
-}
-~~~
-
-### bdev_rbd_reopen {#rpc_bdev_rbd_reopen}
-
-Reopen @ref bdev_config_rbd bdev
-
-This method is available only if SPDK was build with Ceph RBD support.
-
-#### Result
-
-`true` if bdev with provided name was reopened or `false` otherwise.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-name                    | Required | string      | Bdev name
-read_only               | Required | bool        | True if new mode is read-only, false if read-write
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "name": "Rbd1"
-    "read_only": "true"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_rbd_reopen",
   "id": 1
 }
 ~~~

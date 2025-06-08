@@ -29,7 +29,8 @@ typedef void (*spdk_delete_rbd_complete)(void *cb_arg, int bdeverrno);
 int bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		    const char *pool_name,
 		    const char *const *config,
-		    const char *rbd_name, uint32_t block_size, const char *cluster_name, const struct spdk_uuid *uuid);
+		    const char *rbd_name, uint32_t block_size, const char *cluster_name,
+		    const struct spdk_uuid *uuid, bool read_only);
 /**
  * Delete rbd bdev.
  *
@@ -47,14 +48,6 @@ void bdev_rbd_delete(const char *name, spdk_delete_rbd_complete cb_fn,
  * \param new_size_in_mb The new size in MiB for this bdev.
  */
 int bdev_rbd_resize(const char *name, const uint64_t new_size_in_mb);
-
-/**
- * Reopen rbd bdev.
- *
- * \param bdev Name of rbd bdev.
- * \param read_only Whether the bdev should be reopened as read-only or read-write.
- */
-int bdev_rbd_reopen(const char *name, bool read_only);
 
 /**
  * Create a Rados cluster.

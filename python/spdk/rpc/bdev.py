@@ -1127,7 +1127,7 @@ def bdev_rbd_get_clusters_info(client, name=None):
     return client.call('bdev_rbd_get_clusters_info', params)
 
 
-def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=None, config=None, cluster_name=None, uuid=None):
+def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=None, config=None, cluster_name=None, uuid=None, read_only=None):
     """Create a Ceph RBD block device.
     Args:
         pool_name: Ceph RBD pool name
@@ -1138,6 +1138,7 @@ def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=
         config: map of config keys to values (optional)
         cluster_name: Name to identify Rados cluster (optional)
         uuid: UUID of block device (optional)
+        read_only: set block device to read-only (optional)
     Returns:
         Name of created block device.
     """
@@ -1157,6 +1158,8 @@ def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=
         print("WARNING:bdev_rbd_create should be used with specifying -c to have a cluster name after bdev_rbd_register_cluster.")
     if uuid is not None:
         params['uuid'] = uuid
+    if read_only is not None:
+        params['read_only'] = read_only
     return client.call('bdev_rbd_create', params)
 
 
@@ -1180,18 +1183,6 @@ def bdev_rbd_resize(client, name, new_size):
     params['name'] = name
     params['new_size'] = new_size
     return client.call('bdev_rbd_resize', params)
-
-
-def bdev_rbd_reopen(client, name, read_only):
-    """Reopen rbd bdev as read-only or read-write.
-    Args:
-        name: name of rbd bdev to reopen
-        read_only: should the bdev be reopened as read-only
-    """
-    params = dict()
-    params['name'] = name
-    params['read_only'] = read_only
-    return client.call('bdev_rbd_reopen', params)
 
 
 def bdev_error_create(client, base_name, uuid=None):
