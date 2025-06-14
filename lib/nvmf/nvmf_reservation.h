@@ -28,4 +28,9 @@ struct _nvmf_ns_reservation {
 	struct _nvmf_ns_registrants		regs;
 };
 
+
+void spdk_set_rbd_reservation_ops_set(void);
+
+void
+spdk_nvmf_set_custom_ns_reservation_ops(const struct spdk_nvmf_ns_reservation_ops *ops);
 #endif

@@ -18,7 +18,7 @@
 #include "spdk/string.h"
 #include "spdk/util.h"
 #include "spdk/likely.h"
-#include "lib/nvmf/nvmf_reservation.h"
+//#include "lib/nvmf/nvmf_reservation.h"
 #include "spdk/bdev_module.h"
 #include "spdk/log.h"
 SPDK_LOG_REGISTER_COMPONENT(reservation)
@@ -66,6 +66,7 @@ struct bdev_rbd {
 	uint64_t reservation_version;
 	uint64_t reservation_epoch;
 	void * reservation_ns_context;
+	int (*reservation_fn_cbk)(void *ns);
 };
 
 struct bdev_rbd_io_channel {
@@ -1155,6 +1156,11 @@ bdev_rbd_get_clusters_info(struct spdk_jsonrpc_request *request, const char *nam
 	return 0;
 }
 
+int  bdev_rbd_ns_reservation_update_json(struct spdk_bdev *bdev , struct spdk_json_write_ctx **ctx);
+int  bdev_rbd_ns_reservation_load_json(struct spdk_bdev *bdev, void **json, int *json_size);
+bool bdev_rbd_ns_is_ptpl_enabled (struct spdk_bdev *bdev , void *ns, int (*cbk)(void *ns));
+
+
 static const struct spdk_bdev_fn_table rbd_fn_table = {
 	.destruct		= bdev_rbd_destruct,
 	.submit_request		= bdev_rbd_submit_request,
@@ -1162,6 +1168,9 @@ static const struct spdk_bdev_fn_table rbd_fn_table = {
 	.get_io_channel		= bdev_rbd_get_io_channel,
 	.dump_info_json		= bdev_rbd_dump_info_json,
 	.write_config_json	= bdev_rbd_write_config_json,
+	.ns_reservation_update_json = bdev_rbd_ns_reservation_update_json,
+	.ns_reservation_load_json  = bdev_rbd_ns_reservation_load_json,
+	.ns_reservation_is_ptpl_enabled = bdev_rbd_ns_is_ptpl_enabled
 };
 
 static const struct spdk_bdev_fn_table rbd_read_only_fn_table = {
@@ -1497,6 +1506,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 	rbd->reservation_version = 1;
 	rbd->reservation_epoch = 0;
 	rbd->reservation_ns_context = NULL;
+	rbd->reservation_fn_cbk = NULL;
 	SPDK_NOTICELOG("Add %s rbd disk to lun\n", rbd->disk.name);
 
 	spdk_io_device_register(rbd, bdev_rbd_create_cb,
@@ -1600,9 +1610,69 @@ static void
 bdev_rbd_group_destroy_cb(void *io_device, void *ctx_buf)
 {
 }
-
 #define RESERVATION_KEY   "reservation_key"
 #define MAX_RESERV_FILE_SIZE  4096
+
+bool bdev_rbd_ns_is_ptpl_enabled (struct spdk_bdev *bdev , void *ns, int (*cbk)(void *ns))
+{
+	struct bdev_rbd *rbd = (struct bdev_rbd *)bdev;
+	if (rbd->reservation_ns_context == NULL) {
+		rbd->reservation_ns_context = (void *)ns;
+		rbd->reservation_fn_cbk = cbk;
+	}
+}
+
+static int metadata_json_write_cbk(void *cb_ctx, const void *data, size_t size)
+{
+	struct bdev_rbd *rbd = (struct bdev_rbd *)cb_ctx;
+	if (size == 0) {
+		SPDK_ERRLOG("Failed to set metadata  size = 0\n");
+		return -ENOENT;
+	}
+	int rc = rbd_metadata_set(rbd->image, RESERVATION_KEY, (const char *)data);
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed to set metadata  key = reservation_key\n");
+		return -ENOENT;
+	}
+	SPDK_INFOLOG(reservation, "updated metadata by reservation_key %s\n", (const char *)data);
+	return rc;
+}
+
+int bdev_rbd_ns_reservation_update_json(struct spdk_bdev *bdev , struct spdk_json_write_ctx **ctx)
+{
+	struct bdev_rbd *rbd = (struct bdev_rbd *)bdev;
+	*ctx = spdk_json_write_begin(metadata_json_write_cbk, (void *)rbd, 0);
+	if (*ctx == NULL) {
+		return -ENOMEM;
+	}
+	rbd->reservation_epoch ++;
+	spdk_json_write_object_begin(*ctx);
+	spdk_json_write_named_uint64(*ctx, "version", rbd->reservation_version);
+	spdk_json_write_named_uint64(*ctx, "epoch", rbd->reservation_epoch);
+	return 0;
+}
+
+int bdev_rbd_ns_reservation_load_json(struct spdk_bdev *bdev, void **json, int *json_size)
+{
+	ssize_t  rc = 0;
+	struct bdev_rbd *rbd = (struct bdev_rbd *)bdev;
+
+	*json = calloc(MAX_RESERV_FILE_SIZE, 1);
+	if (*json == NULL) {
+		return -ENOMEM;
+	}
+	*json_size = MAX_RESERV_FILE_SIZE;
+	rc = rbd_metadata_get(rbd->image, RESERVATION_KEY, *json, *json_size);
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed to get metadata  key = %s rbd-name %s\n", RESERVATION_KEY, rbd->rbd_name);
+		return rc;
+	}
+	return 0;
+}
+
+#ifdef OLD_RESERVATION_IMPL
+
+
 static bool
 bdev_rbd_ns_is_ptpl_capable_json(const struct spdk_nvmf_ns *ns)
 {
@@ -1796,6 +1866,7 @@ const struct spdk_nvmf_ns_reservation_ops  ops = {
 	.load = bdev_rbd_ns_reservation_load_json,
 };
 
+#endif
 
 static int
 rbd_bdev_check_epoch(struct bdev_rbd *rbd)
@@ -1857,25 +1928,29 @@ exit:
 	return rc;
 }
 
+
+
 static int
 rbd_bdev_notify_ns_reservation_changed(struct bdev_rbd *rbd)
 {
 	int rc = 0;
-	struct spdk_nvmf_reservation_info info = {0};
-	struct spdk_nvmf_ns *ns = (struct spdk_nvmf_ns *)rbd->reservation_ns_context;
-	if(ns == NULL){
-		SPDK_ERRLOG("Ns pointer is not set\n");
+	if (rbd->reservation_ns_context == NULL) {
+		SPDK_ERRLOG("Ns context  not set\n");
 		rc = -1;
 		goto err;
 	}
-	else if (ops.is_ptpl_capable(ns)) {
+	else {
 	/* first need to check whether  rbd->version < metadata version  and only in this case */
 		rc = rbd_bdev_check_epoch(rbd);
 		if (rc == 0) {
 			SPDK_INFOLOG(reservation, "reservation epoch %ld is already loaded\n", rbd->reservation_epoch);
 			goto err;
 		}
-		rc = ops.load(ns, &info);
+		rc = rbd->reservation_fn_cbk(rbd->reservation_ns_context);
+		if (rc != 0) {
+
+		}
+	/*	rc = ops.load(ns, &info);
 		if (rc) {
 			SPDK_ERRLOG("Subsystem load reservation failed\n");
 			goto err;
@@ -1887,10 +1962,9 @@ rbd_bdev_notify_ns_reservation_changed(struct bdev_rbd *rbd)
 			goto err;
 		}
 		SPDK_INFOLOG(reservation, "reservation change was loaded for NS %d\n", ns->nsid);
+		*/
 	}
-	else {
-		SPDK_ERRLOG("Ns  %d  is not PTPL capable\n", ns->nsid);
-	}
+
 err:
  return rc;
 }
@@ -1902,7 +1976,7 @@ bdev_rbd_library_init(void)
 	spdk_io_device_register(&rbd_if, bdev_rbd_group_create_cb, bdev_rbd_group_destroy_cb,
 				0, "bdev_rbd_poll_groups");
 	SPDK_INFOLOG(reservation, "Set custom reservation operations for bdev_rbd!\n");
-	spdk_nvmf_set_custom_ns_reservation_ops(&ops);
+	//spdk_nvmf_set_custom_ns_reservation_ops(&ops);
 	return 0;
 }
 
