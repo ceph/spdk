@@ -1659,7 +1659,7 @@ rbd_bdev_check_epoch(struct bdev_rbd *rbd)
 	void *json = NULL, *end;
 	struct spdk_json_val *values = NULL;
 
-	json = calloc(1, MAX_RESERV_FILE_SIZE);
+	json = calloc(MAX_RESERV_FILE_SIZE, 1);
 	if (json == NULL) {
 		rc = -ENOMEM;
 		goto exit;
@@ -1725,6 +1725,10 @@ rbd_bdev_notify_ns_reservation_changed(struct bdev_rbd *rbd)
 		rc = rbd_bdev_check_epoch(rbd);
 		if (rc == 0) {
 			SPDK_INFOLOG(reservation, "reservation epoch %ld is already loaded\n", rbd->reservation_epoch);
+			goto err;
+		}
+		else if(rc == -ENOKEY || rc == -ENOMEM) {
+			SPDK_INFOLOG(reservation, "no metadata found \n");
 			goto err;
 		}
 		if (rbd->reservation_fn_cbk)
