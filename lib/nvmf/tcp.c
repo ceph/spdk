@@ -3678,7 +3678,8 @@ _nvmf_tcp_qpair_abort_request(void *ctx)
 		break;
 
 	case TCP_REQUEST_STATE_NEED_BUFFER:
-		nvmf_tcp_request_get_buffers_abort(tcp_req_to_abort);//HERE  is the usecase when the IO is aborted immediately in spdk
+	    /* IO aborted/cancelled immediately from internal spdk buffers */ 		
+		nvmf_tcp_request_get_buffers_abort(tcp_req_to_abort);
 		nvmf_tcp_req_set_abort_status(req, tcp_req_to_abort);
 		nvmf_tcp_req_process(ttransport, tcp_req_to_abort);
 		break;
@@ -3724,7 +3725,8 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 	ttransport = SPDK_CONTAINEROF(qpair->transport, struct spdk_nvmf_tcp_transport, transport);
 	transport = &ttransport->transport;
 
-	if (action == 0)  {//Cancel single IO
+	if (action == 0) {
+		/* Cancel the single IO */
 		cid = req->cmd->nvme_cmd.cdw10_bits.io_cancel.cid;
 
 		for (i = 0; i < tqpair->resource_count; i++) {
@@ -3737,7 +3739,7 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 		spdk_trace_record(TRACE_TCP_QP_ABORT_REQ, tqpair->qpair.trace_id, 0, (uintptr_t)req);
 
 		if (tcp_req_to_abort == NULL) {
-			// Set status
+			/* Set status */
 			response->status.sct = SPDK_NVME_SCT_GENERIC;
 			response->status.sc = SPDK_NVME_SC_INVALID_FIELD;
 			SPDK_INFOLOG(io_cancel, "IO cancel completed: action %d, bad status %d\n",
@@ -3745,12 +3747,13 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 			return;
 		}
 
-		req->req_to_abort = &tcp_req_to_abort->req;// TODO understand  the meaning of poller
+		req->req_to_abort = &tcp_req_to_abort->req;
 		req->timeout_tsc = spdk_get_ticks() + transport->opts.abort_timeout_sec * spdk_get_ticks_hz();
 		req->poller = NULL;
 		_nvmf_tcp_qpair_abort_request(req);
 	}
-	else { // Cancel multiple IOs
+	else {
+		/* Cancel multiple IOs */
 		for (i = 0; i < tqpair->resource_count; i++) {
 			if (tqpair->reqs[i].state != TCP_REQUEST_STATE_FREE ) {
 				tcp_req_to_abort = &tqpair->reqs[i];
@@ -3761,7 +3764,7 @@ nvmf_tcp_qpair_io_cancel_request(struct spdk_nvmf_qpair *qpair,
 									action, response->status.sc);
 					return;
 				}
-				req->req_to_abort = &tcp_req_to_abort->req;// TODO understand  the meaning of poller
+				req->req_to_abort = &tcp_req_to_abort->req;
 				req->timeout_tsc = spdk_get_ticks() + transport->opts.abort_timeout_sec * spdk_get_ticks_hz();
 				req->poller = NULL;
 				_nvmf_tcp_qpair_abort_request(req);
