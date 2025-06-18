@@ -255,7 +255,6 @@ spdk_nvmf_subsystem_create(struct spdk_nvmf_tgt *tgt,
 		SPDK_ERRLOG("Subsystem memory allocation failed\n");
 		return NULL;
 	}
-	spdk_set_rbd_reservation_ops_set();/*TODO  add rpc for this purpose*/
 	subsystem->thread = spdk_get_thread();
 	subsystem->state = SPDK_NVMF_SUBSYSTEM_INACTIVE;
 	subsystem->tgt = tgt;
@@ -2257,7 +2256,7 @@ spdk_nvmf_subsystem_add_ns_ext(struct spdk_nvmf_subsystem *subsystem, const char
 			goto err;
 		}
 	}
-
+	spdk_try_rbd_reservation_ops_set(ns->bdev);
 	if (nvmf_ns_is_ptpl_capable(ns)) {
 		rc = nvmf_ns_reservation_load(ns, &info);
 		if (rc) {

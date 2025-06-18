@@ -31,6 +31,7 @@ static bool  ns_rbd_is_ptpl_capable (const struct spdk_nvmf_ns *ns);
 static int ns_rdb_update(const struct spdk_nvmf_ns *ns, const struct spdk_nvmf_reservation_info *info);
 
 static int  ns_rdb_load (const struct spdk_nvmf_ns *ns, struct spdk_nvmf_reservation_info *info);
+static bool rbd_ops_set = false;
 
 int ns_rbd_metadata_updated(void *ns_p);
 
@@ -40,8 +41,16 @@ static struct spdk_nvmf_ns_reservation_ops g_rbd_ops = {
 	.load = ns_rdb_load,
 };
 
-void spdk_set_rbd_reservation_ops_set(void) {
-	spdk_nvmf_set_custom_ns_reservation_ops(&g_rbd_ops);
+void spdk_try_rbd_reservation_ops_set(struct spdk_bdev *bdev) {
+	if (bdev && bdev->fn_table->get_module_type) {
+		if(bdev->fn_table->get_module_type(NULL) == SPDK_BDEV_RDB) {
+			if(rbd_ops_set == false) {
+				spdk_nvmf_set_custom_ns_reservation_ops(&g_rbd_ops);
+				SPDK_ERRLOG("reservation custom ops set for for bdev_rbd \n");
+				rbd_ops_set = true;
+			}
+		}
+	}
 }
 
 static bool

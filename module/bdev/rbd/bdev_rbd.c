@@ -754,6 +754,11 @@ _bdev_rbd_destruct(void *ctx)
 	spdk_io_device_unregister(rbd, bdev_rbd_free_cb);
 }
 
+enum spdk_bdev_type bdev_rbd_get_module_type (void *)
+{
+	return SPDK_BDEV_RDB;
+}
+
 static int
 bdev_rbd_destruct(void *ctx)
 {
@@ -1147,6 +1152,7 @@ static const struct spdk_bdev_fn_table rbd_fn_table = {
 	.get_io_channel		= bdev_rbd_get_io_channel,
 	.dump_info_json		= bdev_rbd_dump_info_json,
 	.write_config_json	= bdev_rbd_write_config_json,
+	.get_module_type	= bdev_rbd_get_module_type,
 	.ns_reservation_update_json = bdev_rbd_ns_reservation_update_json,
 	.ns_reservation_load_json  = bdev_rbd_ns_reservation_load_json,
 	.ns_reservation_is_ptpl_enabled = bdev_rbd_ns_is_ptpl_enabled,
@@ -1643,7 +1649,7 @@ int bdev_rbd_ns_reservation_load_json(struct spdk_bdev *bdev, void **json, int *
 	*json_size = MAX_RESERV_FILE_SIZE;
 	rc = rbd_metadata_get(rbd->image, RESERVATION_KEY, *json, json_size);
 	if (rc < 0) {
-		SPDK_ERRLOG("Failed to get metadata  key = %s rbd-name %s\n", RESERVATION_KEY, rbd->rbd_name);
+		SPDK_NOTICELOG("Failed to get metadata  key = %s rbd-name %s\n", RESERVATION_KEY, rbd->rbd_name);
 		return rc;
 	}
 	SPDK_INFOLOG(reservation, "loaded from the image metadata: current epoch %lu for rbd-name %s, bdev %s\n",

@@ -29,7 +29,7 @@ struct _nvmf_ns_reservation {
 };
 
 
-void spdk_set_rbd_reservation_ops_set(void);
+void spdk_try_rbd_reservation_ops_set(struct spdk_bdev *bdev);
 
 void
 spdk_nvmf_set_custom_ns_reservation_ops(const struct spdk_nvmf_ns_reservation_ops *ops);

@@ -297,6 +297,11 @@ void spdk_bdev_module_release_bdev(struct spdk_bdev *bdev);
 
 typedef void (*spdk_bdev_unregister_cb)(void *cb_arg, int rc);
 
+enum spdk_bdev_type {
+	SPDK_BDEV_TYPE_NOT_SET = 0,
+	SPDK_BDEV_RDB = 1,
+};
+
 /**
  * Function table for a block device backend.
  *
@@ -355,6 +360,9 @@ struct spdk_bdev_fn_table {
 	/** Get bdev module context. */
 	void *(*get_module_ctx)(void *ctx);
 
+	/** Get bdev module type. */
+	enum spdk_bdev_type (*get_module_type)(void *);
+
 	/** Get memory domains used by bdev. Optional - may be NULL.
 	 * Vbdev module implementation should call \ref spdk_bdev_get_memory_domains for underlying bdev.
 	 * Vbdev module must inspect types of memory domains returned by base bdev and report only those
@@ -373,6 +381,7 @@ struct spdk_bdev_fn_table {
 
 	/** Check if bdev can handle spdk_accel_sequence to handle I/O of specific type. */
 	bool (*accel_sequence_supported)(void *ctx, enum spdk_bdev_io_type type);
+
 	/* functions for implementation  of reservation */
 	int  (*ns_reservation_update_json)(struct spdk_bdev *bdev , struct spdk_json_write_ctx **ctx);
 
