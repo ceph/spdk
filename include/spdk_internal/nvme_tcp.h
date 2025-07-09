@@ -692,7 +692,7 @@ nvme_tcp_derive_retained_psk(const uint8_t *psk_in, uint64_t psk_in_size, const 
 		rc = -ENOBUFS;
 		goto end;
 	}
-	if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, NULL, 0) != 1) {
+	if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, "", 0) != 1) {
 		SPDK_ERRLOG("Unable to set salt for HKDF!\n");
 		rc = -EINVAL;
 		goto end;
@@ -783,7 +783,7 @@ nvme_tcp_derive_tls_psk(const uint8_t *psk_in, uint64_t psk_in_size, const char 
 		rc = -ENOBUFS;
 		goto end;
 	}
-	if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, NULL, 0) != 1) {
+	if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, "", 0) != 1) {
 		SPDK_ERRLOG("Unable to set salt for HKDF!\n");
 		rc = -EINVAL;
 		goto end;
