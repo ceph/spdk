@@ -2652,6 +2652,24 @@
       ]
     },
     {
+      "name": "bdev_rbd_get_with_crc32c",
+      "private": true,
+      "params": [
+      ]
+    },
+    {
+      "name": "bdev_rbd_set_with_crc32c",
+      "private": true,
+      "params": [
+        {
+          "name": "enable",
+          "type": "boolean",
+          "required": true,
+          "description": "Enable or disable CRC32"
+        }
+      ]
+    },
+    {
       "name": "bdev_rbd_delete",
       "params": [
         {
