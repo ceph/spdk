@@ -113,6 +113,8 @@ struct spdk_nvmf_request {
 	struct spdk_nvmf_request	*req_to_abort;
 	struct spdk_poller		*poller;
 	struct spdk_bdev_io		*zcopy_bdev_io; /* Contains the bdev_io when using ZCOPY */
+	uint32_t			precomputed_crc32c;  /* CRC32C checksum from NVMf layer */
+	bool				has_crc32c;          /* Whether CRC32C is available */
 
 	/* Internal state that keeps track of the iobuf allocation progress */
 	struct {
@@ -130,7 +132,7 @@ struct spdk_nvmf_request {
  * expected size can be derived from the size of the default configuration.
  */
 SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_request) ==
-		   752 + (SPDK_NVMF_MAX_SGL_ENTRIES - 16) * 2 * sizeof(struct iovec),
+		   760 + (SPDK_NVMF_MAX_SGL_ENTRIES - 16) * 2 * sizeof(struct iovec),
 		   "Incorrect size");
 
 enum spdk_nvmf_qpair_state {
@@ -562,6 +564,7 @@ int spdk_nvmf_request_free(struct spdk_nvmf_request *req);
 int spdk_nvmf_request_complete(struct spdk_nvmf_request *req);
 void spdk_nvmf_request_zcopy_start(struct spdk_nvmf_request *req);
 void spdk_nvmf_request_zcopy_end(struct spdk_nvmf_request *req, bool commit);
+void spdk_nvmf_request_set_crc32c(struct spdk_nvmf_request *req, uint32_t crc32c);
 
 static inline bool
 spdk_nvmf_request_using_zcopy(const struct spdk_nvmf_request *req)
