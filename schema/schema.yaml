@@ -2512,6 +2512,24 @@ methods:
       - name: read_only
         type: boolean
         description: set rbd bdev as read-only
+  - name: bdev_rbd_get_with_crc32c
+    description: |
+      Get the state of CRC32 usage in RBD
+
+      This method is available only if SPDK was build with Ceph RBD support.
+    private: true
+    params: []
+  - name: bdev_rbd_set_with_crc32c
+    description: |
+      Enable or disable CRC32 usage in RBD
+
+      This method is available only if SPDK was build with Ceph RBD support.
+    private: true
+    params:
+      - name: enable
+        type: boolean
+        required: true
+        description: Enable or disable CRC32
   - name: bdev_rbd_delete
     description: |
       Delete @ref bdev_config_rbd bdev
