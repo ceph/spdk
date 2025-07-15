@@ -19,6 +19,7 @@
 #include "spdk/likely.h"
 #include "spdk/bdev_module.h"
 #include "spdk/log.h"
+#include "spdk/nvmf_transport.h"
 SPDK_LOG_REGISTER_COMPONENT(reservation)
 
 static int bdev_rbd_count = 0;
@@ -77,6 +78,8 @@ struct bdev_rbd_io {
 	enum			spdk_bdev_io_status status;
 	rbd_completion_t	comp;
 	size_t			total_len;
+	uint32_t		precomputed_crc32c;  /* CRC32C checksum from NVMf layer */
+	uint32_t		has_crc32c;          /* Whether CRC32C is available */
 };
 
 struct bdev_rbd_cluster {
@@ -582,7 +585,11 @@ _bdev_rbd_start_aio(struct bdev_rbd *disk, struct spdk_bdev_io *bdev_io,
 		}
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
-		if (spdk_likely(iovcnt == 1)) {
+		if (rbd_io->has_crc32c && spdk_likely(iovcnt == 1)) {
+			ret = rbd_aio_write_with_crc32c(image, offset, iov[0].iov_len,
+							iov[0].iov_base, rbd_io->precomputed_crc32c,
+							rbd_io->comp, 0);
+		} else if (spdk_likely(iovcnt == 1)) {
 			ret = rbd_aio_write(image, offset, iov[0].iov_len, iov[0].iov_base,
 					    rbd_io->comp);
 		} else {
@@ -798,6 +805,17 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 	struct bdev_rbd_io *rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
 
 	rbd_io->submit_td = submit_td;
+	rbd_io->has_crc32c = 0;  /* Initialize CRC32C fields */
+	rbd_io->precomputed_crc32c = 0;
+
+	/* Check if CRC32C is available from the request context */
+	if (spdk_bdev_io_get_cb_arg(bdev_io) != NULL) {
+		struct spdk_nvmf_request *req = (struct spdk_nvmf_request *)spdk_bdev_io_get_cb_arg(bdev_io);
+		if (req->has_crc32c) {
+			rbd_io->precomputed_crc32c = req->precomputed_crc32c;
+			rbd_io->has_crc32c = 1;
+		}
+	}
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
 		spdk_bdev_io_get_buf(bdev_io, bdev_rbd_get_buf_cb,
