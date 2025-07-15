@@ -2230,11 +2230,17 @@ data_crc32_calc_done(void *cb_arg, int status)
 		pdu->data_digest_crc32 = nvme_tcp_pdu_calc_data_digest(pdu);
 	}
 	pdu->data_digest_crc32 ^= SPDK_CRC32C_XOR;
+	assert(pdu->req != NULL);
 	if (!MATCH_DIGEST_WORD(pdu->data_digest, pdu->data_digest_crc32)) {
 		SPDK_ERRLOG("Data digest error on tqpair=(%p) with pdu=%p\n", tqpair, pdu);
-		assert(pdu->req != NULL);
 		nvmf_tcp_req_set_cpl(pdu->req, SPDK_NVME_SCT_GENERIC,
 				     SPDK_NVME_SC_COMMAND_TRANSIENT_TRANSPORT_ERROR);
+	} else {
+		/* CRC32C validation passed, propagate to request for optimization */
+		struct spdk_nvmf_tcp_req *tcp_req = pdu->req;
+		if (tcp_req != NULL) {
+			spdk_nvmf_request_set_crc32c(&tcp_req->req, pdu->data_digest_crc32 ^ SPDK_CRC32C_XOR);
+		}
 	}
 	_nvmf_tcp_pdu_payload_handle(tqpair, pdu);
 }
