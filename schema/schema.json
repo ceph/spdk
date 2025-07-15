@@ -2573,6 +2573,7 @@
     },
     {
       "name": "bdev_rbd_wait_for_latest_osdmap",
+      "private": true,
       "params": [
         {
           "name": "name",
@@ -2642,6 +2643,18 @@
           "name": "read_only",
           "type": "boolean",
           "description": "set rbd bdev as read-only"
+        }
+      ]
+    },
+    {
+      "name": "bdev_rbd_set_with_crc32c",
+      "private": true,
+      "params": [
+        {
+          "name": "enable",
+          "type": "boolean",
+          "required": true,
+          "description": "Enable CRC32"
         }
       ]
     },
@@ -4335,6 +4348,34 @@
           "name": "tgt_name",
           "type": "string",
           "description": "Parent NVMe-oF target name."
+        }
+      ]
+    },
+    {
+      "name": "nvmf_subsystem_set_ns_visibility",
+      "params": [
+        {
+          "name": "nqn",
+          "type": "string",
+          "required": true,
+          "description": "Subsystem NQN"
+        },
+        {
+          "name": "tgt_name",
+          "type": "string",
+          "description": "Parent NVMe-oF target name."
+        },
+        {
+          "name": "nsid",
+          "type": "uint32",
+          "required": true,
+          "description": "Namespace ID"
+        },
+        {
+          "name": "auto_visible",
+          "type": "boolean",
+          "required": true,
+          "description": "Namespace visibility"
         }
       ]
     },

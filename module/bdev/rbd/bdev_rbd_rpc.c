@@ -129,6 +129,49 @@ cleanup:
 }
 SPDK_RPC_REGISTER("bdev_rbd_create", rpc_bdev_rbd_create, SPDK_RPC_RUNTIME)
 
+/**
+ * RPC function to get the current rbd_with_crc32c setting
+ */
+static void
+rpc_bdev_rbd_get_with_crc32c(struct spdk_jsonrpc_request *request,
+			      const struct spdk_json_val *params)
+{
+	struct spdk_json_write_ctx *w;
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, bdev_rbd_get_with_crc32c());
+	spdk_jsonrpc_end_result(request, w);
+}
+
+/**
+ * RPC function to set the rbd_with_crc32c parameter
+ */
+static const struct spdk_json_object_decoder rpc_bdev_rbd_set_with_crc32c_decoders[] = {
+	{"enable", offsetof(struct rpc_bdev_rbd_set_with_crc32c_ctx, enable), spdk_json_decode_bool},
+};
+
+static void
+rpc_bdev_rbd_set_with_crc32c(struct spdk_jsonrpc_request *request,
+			      const struct spdk_json_val *params)
+{
+	struct rpc_bdev_rbd_set_with_crc32c req = {};
+	struct spdk_json_write_ctx *w;
+
+	if (spdk_json_decode_object(params, rpc_bdev_rbd_set_with_crc32c_decoders,
+				    SPDK_COUNTOF(rpc_bdev_rbd_set_with_crc32c_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						"Missing or invalid enable parameter");
+		return;
+	}
+
+	bdev_rbd_set_with_crc32c(req.enable);
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, bdev_rbd_get_with_crc32c());
+	spdk_jsonrpc_end_result(request, w);
+}
+
 static const struct spdk_json_object_decoder rpc_bdev_rbd_delete_decoders[] = {
 	{"name", offsetof(struct rpc_bdev_rbd_delete_ctx, name), spdk_json_decode_string},
 };
@@ -311,25 +354,21 @@ cleanup:
 }
 SPDK_RPC_REGISTER("bdev_rbd_get_clusters_info", rpc_bdev_rbd_get_clusters_info, SPDK_RPC_RUNTIME)
 
-struct rpc_bdev_rbd_wait_for_latest_osdmap_cluster {
-	char *name;
-};
-
 static void
-free_rpc_bdev_rbd_wait_for_latest_osdmap_cluster(struct rpc_bdev_rbd_wait_for_latest_osdmap_cluster *req)
+free_rpc_bdev_rbd_wait_for_latest_osdmap_cluster(struct rpc_bdev_rbd_wait_for_latest_osdmap_ctx *req)
 {
 	free(req->name);
 }
 
 static const struct spdk_json_object_decoder rpc_bdev_rbd_wait_for_latest_osdmap_cluster_decoders[] = {
-	{"name", offsetof(struct rpc_bdev_rbd_wait_for_latest_osdmap_cluster, name), spdk_json_decode_string, true},
+	{"name", offsetof(struct rpc_bdev_rbd_wait_for_latest_osdmap_ctx, name), spdk_json_decode_string, true},
 };
 
 static void
 rpc_bdev_rbd_wait_for_latest_osdmap(struct spdk_jsonrpc_request *request,
 				const struct spdk_json_val *params)
 {
-	struct rpc_bdev_rbd_wait_for_latest_osdmap_cluster req = {NULL};
+	struct rpc_bdev_rbd_wait_for_latest_osdmap_ctx req = {NULL};
 	int rc;
 
 	if (spdk_json_decode_object(params, rpc_bdev_rbd_wait_for_latest_osdmap_cluster_decoders,
@@ -352,3 +391,6 @@ cleanup:
 	free_rpc_bdev_rbd_wait_for_latest_osdmap_cluster(&req);
 }
 SPDK_RPC_REGISTER("bdev_rbd_wait_for_latest_osdmap", rpc_bdev_rbd_wait_for_latest_osdmap, SPDK_RPC_RUNTIME)
+
+SPDK_RPC_REGISTER("bdev_rbd_get_with_crc32c", rpc_bdev_rbd_get_with_crc32c, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_rbd_set_with_crc32c", rpc_bdev_rbd_set_with_crc32c, SPDK_RPC_STARTUP)
