@@ -79,6 +79,11 @@ build_macros() {
 	macros+=(-D "release $release")
 	macros+=(-D "version $version")
 
+	# Add debug build flag if specified
+	if [[ -n $debug_build ]]; then
+		macros+=(-D "debug_build 1")
+	fi
+
 	# Adjust dir macros to update the final location of the RPMS
 	for dir in build buildroot rpm source spec srcrpm; do
 		_dir=$(rpm --eval "%{_${dir}dir}")
@@ -188,6 +193,7 @@ release=${RPM_RELEASE:-1}
 requirements=${REQUIREMENTS:-}
 build_requirements=${BUILD_REQUIREMENTS:-}
 version=${SPDK_VERSION:-$(get_version)}
+debug_build=${SPDK_DEBUG_BUILD:-}
 
 rpmbuild_dir=${BUILDDIR:-"$HOME/rpmbuild"}
 spec=$specdir/spdk.spec
