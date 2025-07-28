@@ -24,6 +24,9 @@ SPDK_LOG_REGISTER_COMPONENT(reservation)
 
 static int bdev_rbd_count = 0;
 
+/* Global parameter to control CRC32C usage in RBD write operations */
+static bool g_rbd_with_crc32c = false;
+
 struct bdev_rbd_pool_ctx {
 	rados_t *cluster_p;
 	char *name;
@@ -617,7 +620,7 @@ _bdev_rbd_start_aio(struct bdev_rbd *disk, struct spdk_bdev_io *bdev_io,
 		}
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
-		if (rbd_io->has_crc32c && spdk_likely(iovcnt == 1)) {
+		if (rbd_io->has_crc32c && g_rbd_with_crc32c && spdk_likely(iovcnt == 1)) {
 			ret = rbd_aio_write_with_crc32c(image, offset, iov[0].iov_len,
 							iov[0].iov_base, rbd_io->precomputed_crc32c,
 							rbd_io->comp, 0);
@@ -1902,3 +1905,15 @@ bdev_rbd_library_fini(void)
 }
 
 SPDK_LOG_REGISTER_COMPONENT(bdev_rbd)
+
+bool
+bdev_rbd_get_with_crc32c(void)
+{
+	return g_rbd_with_crc32c;
+}
+
+void
+bdev_rbd_set_with_crc32c(bool enable)
+{
+	g_rbd_with_crc32c = enable;
+}
