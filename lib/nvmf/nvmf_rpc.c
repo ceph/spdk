@@ -1415,7 +1415,6 @@ rpc_nvmf_subsystem_set_ns_visibility(struct spdk_jsonrpc_request *request,
 				    const struct spdk_json_val *params)
 {
 	struct rpc_nvmf_subsystem_set_ns_visibility_ctx *req;
-	struct spdk_nvmf_subsystem *subsystem;
 
 	req = calloc(1, sizeof(*req));
 	if (!req) {
