@@ -382,6 +382,10 @@ group. This fd is suitable for use in APIs such as `spdk_interrupt_register_for_
 
 ## v25.09
 
+### rpc
+
+New option `num_ssl_tickets` was added to the `sock_impl_set_options` structure.
+
 ### bdev
 
 `spdk_bdev_get_preferred_write_alignment`, `spdk_bdev_get_preferred_write_granularity`,

@@ -6023,6 +6023,11 @@
           "name": "enable_ktls",
           "type": "boolean",
           "description": "Enable Kernel TLS (ssl only). Default: false"
+        },
+        {
+          "name": "num_ssl_tickets",
+          "type": "uint32",
+          "description": "Number of SSL tickets."
         }
       ]
     },
