@@ -321,6 +321,7 @@ hello_sock_connect(struct hello_context_t *ctx)
 	impl_opts.tls_cipher_suites = "TLS_AES_128_GCM_SHA256";
 	impl_opts.psk_key = ctx->psk_key;
 	impl_opts.psk_key_size = ctx->psk_key_size;
+	impl_opts.ssl_tickets_number = 0;
 
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
@@ -467,6 +468,7 @@ hello_sock_listen(struct hello_context_t *ctx)
 	impl_opts.tls_cipher_suites = "TLS_AES_128_GCM_SHA256";
 	impl_opts.psk_key = ctx->psk_key;
 	impl_opts.psk_key_size = ctx->psk_key_size;
+	impl_opts.ssl_tickets_number = 0;
 
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
