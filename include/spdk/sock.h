@@ -159,6 +159,11 @@ struct spdk_sock_impl_opts {
 	uint32_t psk_key_size;
 
 	/**
+	 * SSL tickets number. Used by ssl socket module.
+	 */
+	uint32_t ssl_tickets_number;
+
+	/**
 	 * Set default PSK identity. Used by ssl socket module.
 	 */
 	char *psk_identity;

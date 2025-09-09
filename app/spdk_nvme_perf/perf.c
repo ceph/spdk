@@ -356,6 +356,8 @@ perf_set_sock_opts(const char *impl_name, const char *field, uint32_t val, const
 		sock_opts.tls_version = val;
 	} else if (strcmp(field, "ktls") == 0) {
 		sock_opts.enable_ktls = val;
+	} else if (strcmp(field, "ssl_tickets_number") == 0) {
+		sock_opts.ssl_tickets_number = val;
 	} else if (strcmp(field, "zerocopy_threshold") == 0) {
 		sock_opts.zerocopy_threshold = val;
 	} else {
