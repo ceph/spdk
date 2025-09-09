@@ -53,6 +53,7 @@ rpc_sock_impl_get_options(struct spdk_jsonrpc_request *request,
 	spdk_json_write_named_uint32(w, "zerocopy_threshold", sock_opts.zerocopy_threshold);
 	spdk_json_write_named_uint32(w, "tls_version", sock_opts.tls_version);
 	spdk_json_write_named_bool(w, "enable_ktls", sock_opts.enable_ktls);
+	spdk_json_write_named_uint32(w, "ssl_tickets_number", sock_opts.ssl_tickets_number);
 	spdk_json_write_object_end(w);
 	spdk_jsonrpc_end_result(request, w);
 	free_rpc_sock_impl_get_options(&req);
@@ -74,10 +75,11 @@ SPDK_RPC_REGISTER("sock_impl_get_options", rpc_sock_impl_get_options,
 	X(enable_zerocopy_send_client)  \
 	X(zerocopy_threshold)           \
 	X(tls_version)                  \
-	X(enable_ktls)
+	X(enable_ktls)                  \
+	X(ssl_tickets_number)
 
 /* Bump and audit SOCK_IMPL_SET_OPTIONS_FIELDS when this size changes. */
-SPDK_STATIC_ASSERT(sizeof(struct spdk_sock_impl_opts) == 80,
+SPDK_STATIC_ASSERT(sizeof(struct spdk_sock_impl_opts) == 88,
 		   "opts grew -- update SOCK_IMPL_SET_OPTIONS_FIELDS");
 
 static void
