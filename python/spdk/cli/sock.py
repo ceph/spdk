@@ -32,7 +32,8 @@ def add_parser(subparsers):
                                        enable_zerocopy_send_client=args.enable_zerocopy_send_client,
                                        zerocopy_threshold=args.zerocopy_threshold,
                                        tls_version=args.tls_version,
-                                       enable_ktls=args.enable_ktls)
+                                       enable_ktls=args.enable_ktls,
+                                       ssl_tickets_number=args.ssl_tickets_number)
 
     p = subparsers.add_parser('sock_impl_set_options', help="""Set options of socket layer implementation""")
     p.add_argument('-i', '--impl', dest='impl_name',
@@ -52,11 +53,12 @@ def add_parser(subparsers):
     p.add_argument('--zerocopy-threshold',
                    help='Send size threshold in bytes below which the zerocopy flag is omitted', type=int)
     p.add_argument('--tls-version', help='TLS protocol version (e.g. 13 for TLS 1.3) (ssl only)', type=int)
+    p.add_argument('--ssl-tickets-number', help='SSL tickets number', type=int)
     p.add_argument('--ktls', dest='enable_ktls', action=argparse.BooleanOptionalAction,
                    help='Enable Kernel TLS (ssl only). Default: false')
     p.set_defaults(func=sock_impl_set_options, enable_recv_pipe=None, enable_quickack=None,
                    enable_placement_id=None, enable_zerocopy_send_server=None, enable_zerocopy_send_client=None,
-                   zerocopy_threshold=None, tls_version=None, enable_ktls=None)
+                   zerocopy_threshold=None, tls_version=None, enable_ktls=None, ssl_tickets_number=None)
 
     def sock_set_default_impl(args):
         print_json(args.client.sock_set_default_impl(impl_name=args.impl_name))
