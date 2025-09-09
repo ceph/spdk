@@ -6052,6 +6052,11 @@
           "name": "enable_ktls",
           "type": "boolean",
           "description": "Enable Kernel TLS (ssl only). Default: false"
+        },
+        {
+          "name": "ssl_tickets_number",
+          "type": "uint32",
+          "description": "SSL tickets number"
         }
       ]
     },
