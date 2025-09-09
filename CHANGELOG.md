@@ -1,5 +1,11 @@
 # Changelog
 
+## v25.09:
+
+### rpc
+
+New option `num_ssl_tickets` was added to the `sock_impl_set_options` structure.
+
 ## v25.05: NVMe PCIe interrupt mode, DIF insert/strip, mlx5 accel platform driver
 
 ### accel_mlx5

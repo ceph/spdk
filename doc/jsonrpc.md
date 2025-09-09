@@ -12701,7 +12701,8 @@ Example response:
     "enable_zerocopy_send_client": false,
     "zerocopy_threshold": 0,
     "tls_version": 13,
-    "enable_ktls": false
+    "enable_ktls": false,
+    "num_ssl_tickets": 2
   }
 }
 ~~~
@@ -12726,6 +12727,7 @@ zerocopy_threshold          | Optional | number      | Set zerocopy_threshold in
 --                          | --       | --          | that fall below this threshold may be sent without zerocopy flag set
 tls_version                 | Optional | number      | TLS protocol version, e.g. 13 for v1.3 (only applies when impl_name == ssl)
 enable_ktls                 | Optional | boolean     | Enable or disable Kernel TLS (only applies when impl_name == ssl)
+num_ssl_tickets             | Optional | number      | Number of SSL tickets to set (only applies when impl_name == ssl)
 
 #### Response
 
@@ -12751,7 +12753,8 @@ Example request:
     "enable_zerocopy_send_client": false,
     "zerocopy_threshold": 10240,
     "tls_version": 13,
-    "enable_ktls": false
+    "enable_ktls": false,
+    "num_ssl_tickets": 0
   }
 }
 ~~~

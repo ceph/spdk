@@ -3741,7 +3741,8 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
                                        enable_zerocopy_send_client=args.enable_zerocopy_send_client,
                                        zerocopy_threshold=args.zerocopy_threshold,
                                        tls_version=args.tls_version,
-                                       enable_ktls=args.enable_ktls)
+                                       enable_ktls=args.enable_ktls,
+                                       num_ssl_tickets=args.num_ssl_tickets)
 
     p = subparsers.add_parser('sock_impl_set_options', help="""Set options of socket layer implementation""")
     p.add_argument('-i', '--impl', help='Socket implementation name, e.g. posix', required=True)
@@ -3770,9 +3771,10 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
                    action='store_true', dest='enable_ktls')
     p.add_argument('--disable-ktls', help='Disable Kernel TLS',
                    action='store_false', dest='enable_ktls')
+    p.add_argument('--ssl-tickets-number', help='SSL tickets number', type=int)
     p.set_defaults(func=sock_impl_set_options, enable_recv_pipe=None, enable_quickack=None,
                    enable_placement_id=None, enable_zerocopy_send_server=None, enable_zerocopy_send_client=None,
-                   zerocopy_threshold=None, tls_version=None, enable_ktls=None)
+                   zerocopy_threshold=None, tls_version=None, enable_ktls=None, num_ssl_tickets=None)
 
     def sock_set_default_impl(args):
         print_json(rpc.sock.sock_set_default_impl(args.client,
