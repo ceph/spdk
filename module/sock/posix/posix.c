@@ -84,7 +84,8 @@ static struct spdk_sock_impl_opts g_posix_impl_opts = {
 	.psk_identity = NULL,
 	.get_key = NULL,
 	.get_key_ctx = NULL,
-	.tls_cipher_suites = NULL
+	.tls_cipher_suites = NULL,
+	.num_ssl_tickets = DEFAULT_NUM_SSL_TICKETS
 };
 
 static struct spdk_sock_impl_opts g_ssl_impl_opts = {
@@ -99,7 +100,8 @@ static struct spdk_sock_impl_opts g_ssl_impl_opts = {
 	.tls_version = 0,
 	.enable_ktls = false,
 	.psk_key = NULL,
-	.psk_identity = NULL
+	.psk_identity = NULL,
+	.num_ssl_tickets = DEFAULT_NUM_SSL_TICKETS
 };
 
 static struct spdk_sock_map g_map = {
@@ -145,6 +147,7 @@ posix_sock_copy_impl_opts(struct spdk_sock_impl_opts *dest, const struct spdk_so
 	SET_FIELD(get_key);
 	SET_FIELD(get_key_ctx);
 	SET_FIELD(tls_cipher_suites);
+	SET_FIELD(num_ssl_tickets);
 
 #undef SET_FIELD
 #undef FIELD_OK
@@ -796,6 +799,12 @@ posix_sock_create_ssl_context(const SSL_METHOD *method, struct spdk_sock_opts *o
 	if (impl_opts->tls_cipher_suites != NULL &&
 	    SSL_CTX_set_ciphersuites(ctx, impl_opts->tls_cipher_suites) != 1) {
 		SPDK_ERRLOG("Unable to set TLS cipher suites for SSL'\n");
+		goto err;
+	}
+
+	if (impl_opts->num_ssl_tickets != DEFAULT_NUM_SSL_TICKETS &&
+	    !SSL_CTX_set_num_tickets(ctx, impl_opts->num_ssl_tickets)) {
+		SPDK_ERRLOG("Unable to set number of SSL tickets to %u\n", impl_opts->num_ssl_tickets);
 		goto err;
 	}
 
