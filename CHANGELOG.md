@@ -1,10 +1,6 @@
 # Changelog
 
-## v25.09:
-
-### rpc
-
-New option `num_ssl_tickets` was added to the `sock_impl_set_options` structure.
+## v25.05.1
 
 (CVE-2025-57275) Fixed (8981ddb1) an array-out-of-bounds access during update of registrants
 for a namespace when PTPL (Persist through power loss) was enabled.
@@ -21,6 +17,10 @@ Added mlx5 platform driver capable of executing sequences of RDMA + crypto opera
 utilizes UMR (User Memory Region) registration, which allows changing properties of memory keys,
 which are then used by the NIC to perform the offload (e.g. encrypt/decrypt) while doing
 RDMA_READ/RDMA_WRITE operations.
+
+### rpc
+
+New option `num_ssl_tickets` was added to the `sock_impl_set_options` structure.
 
 ### bdev
 
