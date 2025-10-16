@@ -15,6 +15,7 @@ struct rpc_create_rbd {
 	char *name;
 	char *user_id;
 	char *pool_name;
+	char *namespace_name;
 	char *rbd_name;
 	uint32_t block_size;
 	char **config;
@@ -30,6 +31,7 @@ free_rpc_bdev_rbd_create_ctx(struct rpc_create_rbd *req)
 	free(req->name);
 	free(req->user_id);
 	free(req->pool_name);
+	free(req->namespace_name);
 	free(req->rbd_name);
 	bdev_rbd_free_config(req->config);
 	free(req->cluster_name);
@@ -82,6 +84,7 @@ static const struct spdk_json_object_decoder rpc_bdev_rbd_create_decoders[] = {
 	{"user_id", offsetof(struct rpc_create_rbd, user_id), spdk_json_decode_string, true},
 	{"pool_name", offsetof(struct rpc_create_rbd, pool_name), spdk_json_decode_string},
 	{"rbd_name", offsetof(struct rpc_create_rbd, rbd_name), spdk_json_decode_string},
+	{"namespace_name", offsetof(struct rpc_create_rbd, namespace_name), spdk_json_decode_string, true},
 	{"block_size", offsetof(struct rpc_create_rbd, block_size), spdk_json_decode_uint32},
 	{"config", offsetof(struct rpc_create_rbd, config), bdev_rbd_decode_config, true},
 	{"cluster_name", offsetof(struct rpc_create_rbd, cluster_name), spdk_json_decode_string, true},
@@ -108,6 +111,7 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 	}
 
 	rc = bdev_rbd_create(&bdev, req.name, req.user_id, req.pool_name,
+			     req.namespace_name,
 			     (const char *const *)req.config,
 			     req.rbd_name,
 			     req.block_size, req.cluster_name, &req.uuid, req.read_only);

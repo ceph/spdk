@@ -2619,6 +2619,11 @@
           "description": "Image name"
         },
         {
+          "name": "namespace_name",
+          "type": "string",
+          "description": "Namespace name"
+        },
+        {
           "name": "block_size",
           "type": "uint32",
           "required": true,
