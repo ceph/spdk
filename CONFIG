@@ -226,3 +226,6 @@ CONFIG_MAX_LCORES=
 
 # Build all Go components
 CONFIG_GOLANG=n
+
+#enable git commit hash in version string
+SPDK_GIT_COMMIT=y
