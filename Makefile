@@ -82,7 +82,9 @@ XNVMEBUILD = xnvmebuild
 LIB += xnvmebuild
 endif
 
-all: mk/cc.mk $(DIRS-y)
+all:	mk/cc.mk $(DIRS-y)
+	$(Q)echo "CFLAGS --- $(COMMON_CFLAGS)"
+	$(Q)echo "SPDK_GIT_COMMIT: $(SPDK_GIT_COMMIT)"
 clean: $(DIRS-y)
 	$(Q)rm -f include/spdk/config.h
 	$(Q)rm -rf build
