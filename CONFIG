@@ -259,6 +259,3 @@ CONFIG_COPY_FILE_RANGE=n
 
 # liblz4 is available
 CONFIG_HAVE_LZ4=n
-
-#enable git commit hash in version string
-SPDK_GIT_COMMIT=y
