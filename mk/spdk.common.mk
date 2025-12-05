@@ -321,7 +321,14 @@ LDFLAGS += -fsanitize=fuzzer-no-link
 SYS_LIBS += $(CONFIG_FUZZER_LIB)
 endif
 
-SPDK_GIT_COMMIT := 7b53b7d88a4aa2286b41627585282f32e438639b
+# NOTE: In ceph-nvmeof, SPDK is used as a git submodule. Automatic git commit
+# detection via 'git rev-parse' does not work in the container build context
+# because when the SPDK source is copied into the build container via 'COPY . .'
+# in Dockerfile.spdk, the .git directory is not included, so git commands cannot
+# determine the commit hash. Instead, the git commit SHA is provided by the parent
+# ceph-nvmeof Makefile as the SPDK_GIT_COMMIT build argument to Dockerfile.spdk
+# during container builds.
+#SPDK_GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null)
 ifneq (, $(SPDK_GIT_COMMIT))
 COMMON_CFLAGS += -DSPDK_GIT_COMMIT=$(SPDK_GIT_COMMIT)
 endif
