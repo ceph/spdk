@@ -351,7 +351,7 @@ LDFLAGS += -fsanitize=fuzzer-no-link
 SYS_LIBS += $(CONFIG_FUZZER_LIB)
 endif
 
-SPDK_GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null)
+SPDK_GIT_COMMIT := ffc5f4e90768807bd2d39655c540a6d7e4f89a52
 ifneq (, $(SPDK_GIT_COMMIT))
 COMMON_CFLAGS += -DSPDK_GIT_COMMIT=$(SPDK_GIT_COMMIT)
 endif
