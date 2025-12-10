@@ -10,6 +10,7 @@ SO_VER := 8
 SO_MINOR := 0
 
 C_SRCS = bdev_rbd.c bdev_rbd_rpc.c
+CXX_SRCS = bdev_rbd_spdk_context_wq.cpp
 LIBNAME = bdev_rbd
 
 SPDK_MAP_FILE = $(SPDK_ROOT_DIR)/mk/spdk_blank.map
