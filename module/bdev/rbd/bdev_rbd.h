@@ -98,4 +98,19 @@ bool bdev_rbd_get_with_crc32c(void);
  */
 void bdev_rbd_set_with_crc32c(bool enable);
 
+/**
+ * Get the current rbd_with_spdk_wq setting.
+ *
+ * \return true if SPDK ContextWQ is enabled, false otherwise
+ */
+bool bdev_rbd_get_with_spdk_wq(void);
+
+/**
+ * Set the rbd_with_spdk_wq parameter to enable/disable SPDK ContextWQ
+ * for RBD operations.
+ *
+ * \param enable true to enable SPDK ContextWQ, false to disable (uses AsioContextWQ)
+ */
+void bdev_rbd_set_with_spdk_wq(bool enable);
+
 #endif /* SPDK_BDEV_RBD_H */
