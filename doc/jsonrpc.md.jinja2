@@ -6254,6 +6254,238 @@ Example response:
 }
 ~~~
 
+### nvmf_get_ctrl_io_stats {#rpc_nvmf_get_ctrl_io_stats}
+
+#### Parameters
+
+{{ nvmf_get_ctrl_io_stats_params }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_get_ctrl_io_stats", "--nqn", "nqn.2016-06.io.spdk:cnode1", "--host_nqn", "nqn.2016-06.io.spdk:host1") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "category": "controller",
+      "statistics": [
+        {
+          "nqn": "nqn.2016-06.io.spdk:cnode1",
+          "host_nqn": "nqn.2016-06.io.spdk:host1",
+          "stats": {
+            "total_num_ios": 44,
+            "buckets": [
+              {
+                "bucket-size (KB)": 2,
+                "write": {
+                  "io_count": 2,
+                  "latency": {
+                    "total": {
+                      "min": 214,
+                      "max": 667,
+                      "mean": 441
+                    },
+                    "bdev": {
+                      "min": 209,
+                      "max": 663,
+                      "mean": 436
+                    },
+                    "net": {
+                      "min": 0,
+                      "max": 0,
+                      "mean": 0
+                    },
+                    "qos": {
+                      "min": 3,
+                      "max": 5,
+                      "mean": 4
+                    }
+                  }
+                }
+              },
+              {
+                "bucket-size (KB)": 4,
+                "read": {
+                  "io_count": 36,
+                  "latency": {
+                    "total": {
+                      "min": 37,
+                      "max": 553,
+                      "mean": 231
+                    },
+                    "bdev": {
+                      "min": 2,
+                      "max": 479,
+                      "mean": 192
+                    },
+                    "net": {
+                      "min": 26,
+                      "max": 118,
+                      "mean": 38
+                    },
+                    "qos": {
+                      "min": 0,
+                      "max": 10,
+                      "mean": 0
+                    }
+                  }
+                }
+              },
+              {
+                "bucket-size (KB)": 8,
+                "read": {
+                  "io_count": 1,
+                  "latency": {
+                    "total": {
+                      "min": 487,
+                      "max": 487,
+                      "mean": 487
+                    },
+                    "bdev": {
+                      "min": 362,
+                      "max": 362,
+                      "mean": 362
+                    },
+                    "net": {
+                      "min": 124,
+                      "max": 124,
+                      "mean": 124
+                    },
+                    "qos": {
+                      "min": 0,
+                      "max": 0,
+                      "mean": 0
+                    }
+                  }
+                }
+              },
+              {
+                "bucket-size (KB)": 16,
+                "read": {
+                  "io_count": 3,
+                  "latency": {
+                    "total": {
+                      "min": 65,
+                      "max": 508,
+                      "mean": 224
+                    },
+                    "bdev": {
+                      "min": 13,
+                      "max": 325,
+                      "mean": 117
+                    },
+                    "net": {
+                      "min": 49,
+                      "max": 181,
+                      "mean": 105
+                    },
+                    "qos": {
+                      "min": 0,
+                      "max": 1,
+                      "mean": 1
+                    }
+                  }
+                }
+              },
+              {
+                "bucket-size (KB)": 32,
+                "read": {
+                  "io_count": 1,
+                  "latency": {
+                    "total": {
+                      "min": 478,
+                      "max": 478,
+                      "mean": 478
+                    },
+                    "bdev": {
+                      "min": 369,
+                      "max": 369,
+                      "mean": 369
+                    },
+                    "net": {
+                      "min": 108,
+                      "max": 108,
+                      "mean": 108
+                    },
+                    "qos": {
+                      "min": 0,
+                      "max": 0,
+                      "mean": 0
+                    }
+                  }
+                }
+              },
+              {
+                "bucket-size (KB)": 64,
+                "read": {
+                  "io_count": 1,
+                  "latency": {
+                    "total": {
+                      "min": 562,
+                      "max": 562,
+                      "mean": 562
+                    },
+                    "bdev": {
+                      "min": 450,
+                      "max": 450,
+                      "mean": 450
+                    },
+                    "net": {
+                      "min": 111,
+                      "max": 111,
+                      "mean": 111
+                    },
+                    "qos": {
+                      "min": 0,
+                      "max": 0,
+                      "mean": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+~~~
+
+### nvmf_enable_ctrl_io_stats {#rpc_nvmf_enable_ctrl_io_stats}
+
+#### Parameters
+
+{{ nvmf_enable_ctrl_io_stats_params }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_enable_ctrl_io_stats", "--trtype", "TCP", "--enable") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "trtype": "TCP",
+      "enabled": true
+    }
+  ]
+}
+~~~
+
 ### nvmf_create_subsystem {#rpc_nvmf_create_subsystem}
 
 {{ nvmf_create_subsystem_description }}
