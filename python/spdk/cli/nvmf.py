@@ -151,6 +151,25 @@ def add_parser(subparsers):
     p.add_argument('-t', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
     p.set_defaults(func=nvmf_get_subsystems)
 
+    def nvmf_get_ctrl_io_stats(args):
+        print_dict(args.client.nvmf_get_ctrl_io_stats(tgt_name=args.tgt_name, nqn=args.nqn, host_nqn=args.host_nqn, reset=args.reset))
+
+    p = subparsers.add_parser('nvmf_get_ctrl_io_stats', help='Display IO statistics for a specific NVMe-oF controller')
+    p.add_argument('-g', '--tgt-name', help='The name of the NVMe-oF target', type=str)
+    p.add_argument('-n', '--nqn', help='Subsystem NQN', type=str, required=True)
+    p.add_argument('-H', '--host-nqn', help='Host NQN', type=str, required=True)
+    p.add_argument('-r', '--reset', action='store_true', help=""" reset statistics of the controller""")
+    p.set_defaults(func=nvmf_get_ctrl_io_stats)
+    
+    def nvmf_enable_ctrl_io_stats(args):
+        print_dict(args.client.nvmf_enable_ctrl_io_stats(trtype=args.trtype, tgt_name=args.tgt_name,  enable=args.enable))
+
+    p = subparsers.add_parser('nvmf_enable_ctrl_io_stats', help='Enable/disable IO statistics for a specific NVMe-oF controller')
+    p.add_argument('-t', '--trtype', help='Transport type (ex. RDMA)', type=str, required=True)
+    p.add_argument('-g', '--tgt-name', help='The name of the NVMe-oF target', type=str)
+    p.add_argument('-e', '--enable', action='store_true', help=""" enable statistics of the controller""", required=True)
+    p.set_defaults(func=nvmf_enable_ctrl_io_stats)
+
     def nvmf_create_subsystem(args):
         params = strip_globals(vars(args))
         args.client.nvmf_create_subsystem(**params)
@@ -341,7 +360,7 @@ def add_parser(subparsers):
     p = subparsers.add_parser('nvmf_subsystem_set_ns_visibility', help='Change visibility of a namespace')
     p.add_argument('nqn', help='NVMe-oF subsystem NQN')
     p.add_argument('nsid', help='The requested NSID', type=int)
-    p.add_argument('auto-visible', help='Auto visible', action='store_true')
+    p.add_argument('--auto-visible', help='Auto visible', action='store_true')
     p.add_argument('-t', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
     p.set_defaults(func=nvmf_subsystem_set_ns_visibility)
 

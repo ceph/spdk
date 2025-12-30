@@ -57,7 +57,7 @@ rpc_sock_impl_get_options(struct spdk_jsonrpc_request *request,
 	spdk_json_write_named_uint32(w, "zerocopy_threshold", sock_opts.zerocopy_threshold);
 	spdk_json_write_named_uint32(w, "tls_version", sock_opts.tls_version);
 	spdk_json_write_named_bool(w, "enable_ktls", sock_opts.enable_ktls);
-	spdk_json_write_named_uint32(w, "num_ssl_tickets", sock_opts.num_ssl_tickets);
+	spdk_json_write_named_uint32(w, "ssl_tickets_number", sock_opts.ssl_tickets_number);
 	spdk_json_write_object_end(w);
 	spdk_jsonrpc_end_result(request, w);
 	free_rpc_sock_impl_get_options(&req);
@@ -77,7 +77,7 @@ static const struct spdk_json_object_decoder rpc_sock_impl_set_options_decoders[
 	{"zerocopy_threshold", offsetof(struct rpc_sock_impl_set_options_ctx, zerocopy_threshold), spdk_json_decode_uint32, true},
 	{"tls_version", offsetof(struct rpc_sock_impl_set_options_ctx, tls_version), spdk_json_decode_uint32, true},
 	{"enable_ktls", offsetof(struct rpc_sock_impl_set_options_ctx, enable_ktls), spdk_json_decode_bool, true},
-	{"num_ssl_tickets", offsetof(struct rpc_sock_impl_set_options_ctx, num_ssl_tickets), spdk_json_decode_uint32, true},
+	{"ssl_tickets_number", offsetof(struct rpc_sock_impl_set_options_ctx, ssl_tickets_number), spdk_json_decode_uint32, true},
 };
 
 static void
@@ -120,7 +120,7 @@ rpc_sock_impl_set_options(struct spdk_jsonrpc_request *request,
 	req.zerocopy_threshold = sock_opts.zerocopy_threshold;
 	req.tls_version = sock_opts.tls_version;
 	req.enable_ktls = sock_opts.enable_ktls;
-	req.num_ssl_tickets = sock_opts.num_ssl_tickets;
+	req.ssl_tickets_number = sock_opts.ssl_tickets_number;
 
 	if (spdk_json_decode_object(params, rpc_sock_impl_set_options_decoders,
 				    SPDK_COUNTOF(rpc_sock_impl_set_options_decoders), &req)) {
@@ -140,7 +140,7 @@ rpc_sock_impl_set_options(struct spdk_jsonrpc_request *request,
 	sock_opts.zerocopy_threshold = req.zerocopy_threshold;
 	sock_opts.tls_version = req.tls_version;
 	sock_opts.enable_ktls = req.enable_ktls;
-	sock_opts.num_ssl_tickets = req.num_ssl_tickets;
+	sock_opts.ssl_tickets_number = req.ssl_tickets_number;
 
 	rc = spdk_sock_impl_set_opts(req.impl_name, &sock_opts, sizeof(sock_opts));
 	if (rc < 0) {

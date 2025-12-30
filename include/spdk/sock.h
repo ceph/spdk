@@ -195,7 +195,7 @@ struct spdk_sock_impl_opts {
 	/**
 	 * SSL tickets number. Used by ssl socket module.
 	 */
-	uint32_t num_ssl_tickets;
+	uint32_t ssl_tickets_number;
 };
 
 /**

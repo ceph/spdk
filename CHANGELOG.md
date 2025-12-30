@@ -384,7 +384,7 @@ group. This fd is suitable for use in APIs such as `spdk_interrupt_register_for_
 
 ### rpc
 
-New option `num_ssl_tickets` was added to the `sock_impl_set_options` structure.
+New option `ssl_tickets_number` was added to the `sock_impl_set_options` structure.
 
 ### bdev
 
