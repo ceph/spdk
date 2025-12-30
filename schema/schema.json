@@ -4088,6 +4088,53 @@
       ]
     },
     {
+      "name": "nvmf_get_ctrl_io_stats",
+      "params": [
+        {
+          "name": "tgt_name",
+          "type": "string",
+          "description": "Parent NVMe-oF target name."
+        },
+        {
+          "name": "nqn",
+          "type": "string",
+          "required": true,
+          "description": "Subsystem NQN."
+        },
+        {
+          "name": "host_nqn",
+          "type": "string",
+          "required": true,
+          "description": "Host NQN."
+        },
+        {
+          "name": "reset",
+          "type": "boolean",
+          "description": "Reset NVMf IO statistics of controller"
+        }
+      ]
+    },
+    {
+      "name": "nvmf_enable_ctrl_io_stats",
+      "params": [
+        {
+          "name": "tgt_name",
+          "type": "string",
+          "description": "Parent NVMe-oF target name."
+        },
+        {
+          "name": "trtype",
+          "type": "string",
+          "description": "target type"
+        },
+        {
+          "name": "enable",
+          "type": "boolean",
+          "description": "Enable/disable NVMf IO statistics"
+        }
+      ]
+    },
+    {
       "name": "nvmf_create_subsystem",
       "params": [
         {
