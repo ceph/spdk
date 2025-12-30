@@ -135,6 +135,8 @@ function usage() {
 	echo " --without-golang          No path required."
 	echo " --with-aio-fsdev          Build aio FSDEV component."
 	echo " --without-aio-fsdev       No path required."
+	echo " --without-nvmf-controller-io-stats No path required "
+	echo " --with-nvmf-controller-io-stats    Build NVMf controller io statistics components"
 	echo ""
 	echo "Environment variables:"
 	echo ""
@@ -711,6 +713,13 @@ for i in "$@"; do
 		--without-aio-fsdev)
 			CONFIG[AIO_FSDEV]=n
 			;;
+		--without-nvmf-controller-io-stats)
+                        CONFIG[NVMF_CONTROLLER_IO_STATS]=n
+                        ;;
+		--with-nvmf-controller-io-stats)
+                       CONFIG[NVMF_CONTROLLER_IO_STATS]=y
+                        ;;
+
 		--)
 			break
 			;;

@@ -3,7 +3,7 @@
  *   Copyright (c) 2018-2021 Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
-
+#include "spdk/config.h"
 #include "spdk/bdev.h"
 #include "spdk/log.h"
 #include "spdk/rpc.h"
@@ -14,9 +14,9 @@
 #include "spdk/util.h"
 #include "spdk/bit_array.h"
 #include "spdk/config.h"
+#include "nvmf_tcp_stats.h"
 
 #include "spdk_internal/assert.h"
-
 #include "nvmf_internal.h"
 
 static int rpc_ana_state_parse(const char *str, enum spdk_nvme_ana_state *ana_state);
@@ -28,7 +28,6 @@ json_write_hex_str(struct spdk_json_write_ctx *w, const void *data, size_t size)
 	const uint8_t *buf = data;
 	char *str, *out;
 	int rc;
-
 	str = malloc(size * 2 + 1);
 	if (str == NULL) {
 		return -1;
@@ -318,6 +317,288 @@ rpc_nvmf_get_subsystems(struct spdk_jsonrpc_request *request,
 	free(req.nqn);
 }
 SPDK_RPC_REGISTER("nvmf_get_subsystems", rpc_nvmf_get_subsystems, SPDK_RPC_RUNTIME)
+
+struct rpc_get_ctrl_io_stats {
+	char *nqn;
+	char *host_nqn;
+	char *tgt_name;
+	bool reset;
+};
+
+static const struct spdk_json_object_decoder rpc_get_ctrl_io_stats_decoders[] = {
+	{"nqn", offsetof(struct rpc_get_ctrl_io_stats, nqn), spdk_json_decode_string, true},
+	{"host_nqn", offsetof(struct rpc_get_ctrl_io_stats, host_nqn), spdk_json_decode_string, true},
+	{"tgt_name", offsetof(struct rpc_get_ctrl_io_stats, tgt_name), spdk_json_decode_string, true},
+	{"reset", offsetof(struct rpc_get_ctrl_io_stats, reset), spdk_json_decode_bool, true}
+};
+
+struct rpc_max_qp_ctx {
+	struct qp_io_stats stats;
+	struct spdk_nvmf_ctrlr *ctrlr;
+	struct spdk_jsonrpc_request *request;
+	bool supported;
+	bool has_max;
+	bool reset_stats;
+};
+
+/* RPC  handlers for IO statistics */
+static uint32_t bucket_2_size[IO_SIZE_BUCKETS] = {2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
+
+static void
+accumulate_latency(struct latency_stats *accum_latency_stats,
+		   const struct latency_stats *qp_latency_stats)
+{
+	accum_latency_stats->mean += qp_latency_stats->mean;
+	if (accum_latency_stats->max < qp_latency_stats->max) {
+		accum_latency_stats->max = qp_latency_stats->max;
+	}
+	if (accum_latency_stats->min_set == false) {
+		accum_latency_stats->min = qp_latency_stats->min;
+		accum_latency_stats->min_set = true;
+	} else {
+		if (accum_latency_stats->min > qp_latency_stats->min) {
+			accum_latency_stats->min = qp_latency_stats->min;
+		}
+	}
+}
+
+static void
+accumulate_stats(struct qp_io_stats *accum_stats,
+		 const struct qp_io_stats *qp_stats)
+{
+	int i, j;
+	if (qp_stats->total_num_ios < 10) { /* dont take into account QPs with no IOs */
+		return;
+	}
+	accum_stats->total_num_ios += qp_stats->total_num_ios;
+	for (i = 0; i < IO_SIZE_BUCKETS; i++) {
+		for (j = 0; j < IO_DIR_MAX; j++) {
+			/* Do not take into account buckets with no IOs - it could ruin minimum of statistics */
+			if (qp_stats->buckets[i].dir[j].io_count) {
+				accum_stats->buckets[i].dir[j].io_count +=  qp_stats->buckets[i].dir[j].io_count;
+				accumulate_latency(&accum_stats->buckets[i].dir[j].total, &qp_stats->buckets[i].dir[j].total);
+				accumulate_latency(&accum_stats->buckets[i].dir[j].bdev,  &qp_stats->buckets[i].dir[j].bdev);
+				accumulate_latency(&accum_stats->buckets[i].dir[j].net,   &qp_stats->buckets[i].dir[j].net);
+				accumulate_latency(&accum_stats->buckets[i].dir[j].qos,   &qp_stats->buckets[i].dir[j].qos);
+			}
+		}
+	}
+}
+
+static void
+emit_latency_stats(struct spdk_json_write_ctx *w,
+		   const struct latency_stats *s, uint64_t ticks_hz, uint64_t io_cnt)
+{
+	spdk_json_write_named_uint64(w, "min", s->min * 1000000ULL / ticks_hz);
+	spdk_json_write_named_uint64(w, "max", s->max * 1000000ULL / ticks_hz);
+	spdk_json_write_named_uint64(w, "mean",
+				     (uint64_t)((s->mean / io_cnt) * 1000000ULL / ticks_hz));
+}
+
+static void
+emit_latency_group(struct spdk_json_write_ctx *w,
+		   const struct io_latency_group *g, uint64_t ticks_hz)
+{
+	spdk_json_write_named_uint64(w, "io_count", g->io_count);
+
+	spdk_json_write_named_object_begin(w, "latency");
+
+	spdk_json_write_named_object_begin(w, "total");
+	emit_latency_stats(w, &g->total, ticks_hz, g->io_count);
+	spdk_json_write_object_end(w);
+
+	spdk_json_write_named_object_begin(w, "bdev");
+	emit_latency_stats(w, &g->bdev, ticks_hz, g->io_count);
+	spdk_json_write_object_end(w);
+
+	spdk_json_write_named_object_begin(w, "net");
+	emit_latency_stats(w, &g->net, ticks_hz, g->io_count);
+	spdk_json_write_object_end(w);
+
+	spdk_json_write_named_object_begin(w, "qos");
+	emit_latency_stats(w, &g->qos, ticks_hz, g->io_count);
+	spdk_json_write_object_end(w);
+
+	spdk_json_write_object_end(w); /* latency */
+}
+
+static void
+emit_empty_qp_stats(struct spdk_json_write_ctx *w)
+{
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint64(w, "total_num_ios", 0);
+	spdk_json_write_named_array_begin(w, "buckets");
+	spdk_json_write_array_end(w);
+	spdk_json_write_object_end(w);
+}
+
+static void
+emit_qp_stats(struct spdk_json_write_ctx *w,
+	      const struct qp_io_stats *stats)
+{
+	uint32_t i;
+	uint64_t ticks_hz = spdk_get_ticks_hz();
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint64(w, "total_num_ios",
+				     stats->total_num_ios);
+	spdk_json_write_named_array_begin(w, "buckets");
+
+	for (i = 0; i < IO_SIZE_BUCKETS; i++) {
+		const struct io_size_bucket *b = &stats->buckets[i];
+		/* Skip empty buckets */
+		if (b->dir[IO_READ].io_count == 0 &&
+		    b->dir[IO_WRITE].io_count == 0) {
+			continue;
+		}
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_uint32(w, "bucket-size (KB)", bucket_2_size[i]);
+		if (b->dir[IO_READ].io_count) {
+			spdk_json_write_named_object_begin(w, "read");
+			emit_latency_group(w, &b->dir[IO_READ], ticks_hz);
+			spdk_json_write_object_end(w);
+		}
+		if (b->dir[IO_WRITE].io_count) {
+			spdk_json_write_named_object_begin(w, "write");
+			emit_latency_group(w, &b->dir[IO_WRITE], ticks_hz);
+			spdk_json_write_object_end(w);
+		}
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_array_end(w);
+	spdk_json_write_object_end(w);
+}
+
+static void
+rpc_collect_qp_stats(struct spdk_io_channel_iter *i)
+{
+	struct rpc_max_qp_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_nvmf_poll_group *pg;
+	struct spdk_nvmf_qpair *qpair;
+
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	if (!ch) {
+		spdk_for_each_channel_continue(i, -ENOMEM);
+		return;
+	}
+	pg = spdk_io_channel_get_ctx(ch);
+	TAILQ_FOREACH(qpair, &pg->qpairs, link) {
+		if (qpair->ctrlr != ctx->ctrlr) {
+			continue;
+		}
+		struct qp_io_stats *stats = NULL;
+		if (qpair->transport->ops->get_qp_statistics) {
+			qpair->transport->ops->get_qp_statistics(qpair, (void **)&stats);
+		}
+		if (stats == NULL) {
+			ctx->supported = false;
+			continue;
+		}
+		if (ctx->reset_stats) {
+			nvmf_stats_reset_qp(stats);
+		} else {
+			accumulate_stats(&ctx->stats, stats);
+			ctx->has_max = true;
+		}
+	}
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+rpc_collect_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct rpc_max_qp_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_json_write_ctx *w;
+	w = spdk_jsonrpc_begin_result(ctx->request);
+	if (!ctx->supported) {
+		SPDK_NOTICELOG("RPC io stats feature not supported\n");
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_string(w, "supported", "io statistics feature is not supported");
+		spdk_json_write_object_end(w);
+	} else if (ctx->reset_stats) {
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_bool(w, "reset", true);
+		spdk_json_write_object_end(w);
+	} else if (ctx->has_max) {
+		emit_qp_stats(w, &ctx->stats);
+	} else {
+		emit_empty_qp_stats(w);
+	}
+	spdk_jsonrpc_end_result(ctx->request, w);
+	free(ctx);
+}
+
+static void
+rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	struct rpc_get_ctrl_io_stats req = { 0 };
+	struct spdk_nvmf_subsystem *subsystem = NULL;
+	struct spdk_nvmf_tgt *tgt;
+	struct spdk_nvmf_ctrlr *ctrlr = NULL;
+	bool found_ctrl = false;
+	struct rpc_max_qp_ctx *ctx = NULL;
+	if (params) {
+		if (spdk_json_decode_object(params, rpc_get_ctrl_io_stats_decoders,
+					    SPDK_COUNTOF(rpc_get_ctrl_io_stats_decoders),
+					    &req)) {
+			SPDK_ERRLOG("spdk_json_decode_object failed\n");
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+			return;
+		}
+	}
+	tgt = spdk_nvmf_get_tgt(req.tgt_name);
+	if (!tgt) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		goto cleanup;
+	}
+	if (!req.nqn || !req.host_nqn) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "nqn and host_nqn are required");
+		goto cleanup;
+	}
+	if (req.nqn) {
+		subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req.nqn);
+		if (!subsystem) {
+			SPDK_ERRLOG("subsystem '%s' does not exist\n", req.nqn);
+			spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+			goto cleanup;
+		}
+		TAILQ_FOREACH(ctrlr, &subsystem->ctrlrs, link) {
+			if (strcmp(ctrlr->hostnqn, req.host_nqn) == 0) {
+				/* Found controller */
+				found_ctrl = true;
+				ctx = calloc(1, sizeof(*ctx));
+				if (!ctx) {
+					spdk_jsonrpc_send_error_response(request,
+									 SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+									 "Out of memory");
+					goto cleanup;
+				}
+				ctx->ctrlr = ctrlr;
+				break;
+			}
+		}
+		if (!found_ctrl) {
+			SPDK_ERRLOG("controller does not exist for host '%s'\n", req.host_nqn);
+			spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+			goto cleanup;
+		}
+	}
+	ctx->request = request;
+	ctx->reset_stats = req.reset;
+	ctx->supported = true;
+	SPDK_NOTICELOG("RPC starting for_each_channel ctx=%p ctrlr=%p tgt=%s reset? %d\n",
+		       ctx, ctx->ctrlr, req.tgt_name, ctx->reset_stats);
+	spdk_for_each_channel(tgt, rpc_collect_qp_stats, ctx, rpc_collect_done);
+cleanup:
+	free(req.tgt_name);
+	free(req.nqn);
+	free(req.host_nqn);
+}
+
+SPDK_RPC_REGISTER("nvmf_get_ctrl_io_stats", rpc_nvmf_get_ctrl_io_stats, SPDK_RPC_RUNTIME)
 
 struct rpc_subsystem_create {
 	char *nqn;
