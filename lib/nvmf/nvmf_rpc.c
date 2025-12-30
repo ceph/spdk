@@ -356,7 +356,8 @@ decode_subsystem_model_number(const struct spdk_json_val *val, void *out)
 }
 
 static const struct spdk_json_object_decoder rpc_nvmf_get_ctrl_io_stats_decoders[] = {
-	{"nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, nqn), spdk_json_decode_string},
+
+	{"nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, nqn), spdk_json_decode_string },
 	{"host_nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, host_nqn), spdk_json_decode_string},
 	{"tgt_name", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, tgt_name), spdk_json_decode_string, true},
 	{"reset", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, reset), spdk_json_decode_bool, true}
@@ -457,8 +458,8 @@ rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
 	}
 	if (!req.nqn || !req.host_nqn) {
 		spdk_jsonrpc_send_error_response(request,
-						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-						 "nqn and host_nqn are required");
+						SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						"nqn and host_nqn are required");
 		goto cleanup;
 	}
 	if (req.nqn) {
@@ -479,6 +480,8 @@ rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
 									 "Out of memory");
 					goto cleanup;
 				}
+
+				spdk_nvmf_stats_reset_qp(&ctx->stats);
 				ctx->ctrlr = ctrlr;
 				break;
 			}
