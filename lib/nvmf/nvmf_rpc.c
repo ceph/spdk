@@ -15,6 +15,7 @@
 #include "spdk/util.h"
 #include "spdk/bit_array.h"
 #include "spdk/config.h"
+#include "nvmf_controller_stats.h"
 
 #include "spdk_internal/assert.h"
 #include "spdk_internal/rpc_autogen.h"
@@ -352,6 +353,408 @@ decode_subsystem_model_number(const struct spdk_json_val *val, void *out)
 	free(str);
 	return rc;
 }
+
+static const struct spdk_json_object_decoder rpc_nvmf_get_ctrl_io_stats_decoders[] = {
+	{"nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, nqn), spdk_json_decode_string, true},
+	{"host_nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, host_nqn), spdk_json_decode_string, true},
+	{"tgt_name", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, tgt_name), spdk_json_decode_string, true},
+	{"reset", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, reset), spdk_json_decode_bool, true},
+	{"verbose_stats", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, verbose_stats), spdk_json_decode_bool, true}
+};
+
+/* Bucket structure to hold stats per key */
+struct io_stats_bucket {
+	char key[256];
+	char subnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+	char hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+	struct qp_io_stats stats;
+	TAILQ_ENTRY(io_stats_bucket) link;
+};
+TAILQ_HEAD(io_stats_bucket_list, io_stats_bucket);
+
+struct rpc_max_qp_ctx {
+	struct io_stats_bucket_list buckets;
+	char *req_nqn;
+	char *req_host_nqn;
+	bool verbose;
+	struct spdk_nvmf_ctrlr *ctrlr;
+	struct spdk_jsonrpc_request *request;
+	bool supported;
+	bool has_max;
+	bool reset_stats;
+};
+
+static void
+rpc_collect_qp_stats(struct spdk_io_channel_iter *i)
+{
+	struct rpc_max_qp_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_nvmf_poll_group *pg;
+	struct spdk_nvmf_qpair *qpair;
+
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	SPDK_NOTICELOG("rpc_collect_qp_stats invoked for channel %p\n", ch);
+	if (!ch) {
+		spdk_for_each_channel_continue(i, -ENOMEM);
+		return;
+	}
+	pg = spdk_io_channel_get_ctx(ch);
+	TAILQ_FOREACH(qpair, &pg->qpairs, link) {
+		if (!qpair->ctrlr || !qpair->ctrlr->subsys) {
+			continue;
+		}
+		/* Flexible filtering instead of strict ctrlr check */
+		if (ctx->req_host_nqn && strcmp(qpair->ctrlr->hostnqn, ctx->req_host_nqn) != 0) {
+			continue;
+		}
+		if (ctx->req_nqn && strcmp(qpair->ctrlr->subsys->subnqn, ctx->req_nqn) != 0) {
+			continue;
+		}
+
+		struct qp_io_stats *stats = NULL;
+		if (qpair->transport->ops->get_qp_statistics) {
+			qpair->transport->ops->get_qp_statistics(qpair, (void **)&stats, false);
+		}
+		if (stats == NULL) {
+			ctx->supported = false;
+			continue;
+		}
+		if (ctx->reset_stats) {
+			spdk_nvmf_stats_reset_qp(stats);
+		} else {
+			/* Key Selection according to 3 rules */
+			char key[256] = {0};
+			const char *cur_subnqn = qpair->ctrlr->subsys->subnqn;
+			const char *cur_hostnqn = qpair->ctrlr->hostnqn;
+
+			if (ctx->req_host_nqn && !ctx->req_nqn) {
+				if (ctx->verbose) {
+					snprintf(key, sizeof(key), "subsystem: %s", cur_subnqn);
+				} else {
+					snprintf(key, sizeof(key), "host: %s", ctx->req_host_nqn);
+				}
+			} else if (ctx->req_nqn && !ctx->req_host_nqn) {
+				if (ctx->verbose) {
+					snprintf(key, sizeof(key), "host: %s", cur_hostnqn);
+				} else {
+					snprintf(key, sizeof(key), "subsystem: %s", ctx->req_nqn);
+				}
+			} else if (!ctx->req_host_nqn && !ctx->req_nqn) {
+				if (ctx->verbose) {
+					snprintf(key, sizeof(key), "subsystem: %s", cur_subnqn);
+				} else {
+					snprintf(key, sizeof(key), "total");
+				}
+			} else {
+				snprintf(key, sizeof(key), "host: %s, subsystem: %s", cur_hostnqn, cur_subnqn);
+			}
+
+			/* Find or create bucket in ctx->buckets */
+			struct io_stats_bucket *b = NULL, *tmp;
+			TAILQ_FOREACH(tmp, &ctx->buckets, link) {
+				if (strcmp(tmp->key, key) == 0) {
+					b = tmp;
+					break;
+				}
+			}
+			if (!b) {
+				b = calloc(1, sizeof(*b));
+				if (b) {
+					snprintf(b->key, sizeof(b->key), "%s", key);
+					if (ctx->req_host_nqn || (ctx->req_nqn && ctx->verbose)) {
+						snprintf(b->hostnqn, sizeof(b->hostnqn), "%s", cur_hostnqn);
+					}
+					if (cur_subnqn && (ctx->req_nqn || ctx->verbose)) {
+						snprintf(b->subnqn, sizeof(b->subnqn), "%s", cur_subnqn);
+					}
+					spdk_nvmf_stats_reset_qp(&b->stats);
+					TAILQ_INSERT_TAIL(&ctx->buckets, b, link);
+				} else {
+					SPDK_ERRLOG("Failed to allocate memory for I/O stats bucket (key: %s)\n", key);
+					spdk_for_each_channel_continue(i, -ENOMEM);
+					return;
+				}
+			}
+			if (b) {
+				//SPDK_NOTICELOG("Accumulating stats for qp %p \n", qpair);
+				spdk_nvmf_accumulate_stats(&b->stats, stats); /* Accumulate into bucket */
+				ctx->has_max = true;
+			}
+		}
+	}
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+rpc_collect_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct rpc_max_qp_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_json_write_ctx *w;
+	struct io_stats_bucket *b, *tmp;
+
+	SPDK_NOTICELOG("rpc_collect_done invoked with status %d, supported=%d, has_max=%d\n",
+					status, ctx->supported, ctx->has_max);
+	if (status != 0) {
+		spdk_jsonrpc_send_error_response(ctx->request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						"Internal error while collecting statistics");
+		goto cleanup;
+	}
+	w = spdk_jsonrpc_begin_result(ctx->request);
+	if (!w) {
+		SPDK_ERRLOG("Failed to allocate JSON write context\n");
+		goto cleanup;
+	}
+	if (!ctx->supported) {
+		SPDK_NOTICELOG("RPC io stats feature not supported\n");
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_string(w, "supported", "io statistics feature is not supported");
+		spdk_json_write_object_end(w);
+	} else if (ctx->reset_stats) {
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_bool(w, "reset", true);
+		spdk_json_write_object_end(w);
+	} else if (ctx->has_max) {
+		/* Loop over buckets to print array instead of single dump */
+		spdk_json_write_object_begin(w);
+		/* Derive title once for the whole request */
+		const char *category = "total";
+		if (ctx->req_nqn && ctx->req_host_nqn) {
+			category = "controller";
+		} else if (ctx->req_host_nqn && !ctx->req_nqn) {
+			category = ctx->verbose ? "subsystem" : "host";
+		} else if (ctx->req_nqn && !ctx->req_host_nqn) {
+			category = ctx->verbose ? "host" : "subsystem";
+		} else if (!ctx->req_host_nqn && !ctx->req_nqn && ctx->verbose) {
+			category = "subsystem";
+		}
+		spdk_json_write_named_string(w, "category", category);
+		spdk_json_write_named_array_begin(w, "statistics");
+
+		TAILQ_FOREACH(b, &ctx->buckets, link) {
+			spdk_json_write_object_begin(w);
+			if (b->subnqn[0]) {
+				spdk_json_write_named_string(w, "nqn", b->subnqn);
+			}
+			if (b->hostnqn[0]) {
+				spdk_json_write_named_string(w, "host_nqn", b->hostnqn);
+			}
+
+			spdk_json_write_name(w, "stats");
+			spdk_nvmf_dump_ctrl_stats(w, &b->stats);
+			spdk_json_write_object_end(w);
+		}
+
+		spdk_json_write_array_end(w);
+		spdk_json_write_object_end(w);
+	} else {
+		spdk_nvmf_dump_empty_ctrl_stats(w);
+	}
+	spdk_jsonrpc_end_result(ctx->request, w);
+cleanup:
+	TAILQ_FOREACH_SAFE(b, &ctx->buckets, link, tmp) {
+		TAILQ_REMOVE(&ctx->buckets, b, link);
+		free(b);
+	}
+	free(ctx->req_nqn);
+	free(ctx->req_host_nqn);
+	free(ctx);
+}
+
+static void
+rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_get_ctrl_io_stats_ctx req = {};
+	struct spdk_nvmf_tgt *tgt;
+	struct rpc_max_qp_ctx *ctx = NULL;
+
+	if (params) {
+		if (spdk_json_decode_object(params, rpc_nvmf_get_ctrl_io_stats_decoders,
+					SPDK_COUNTOF(rpc_nvmf_get_ctrl_io_stats_decoders),
+					&req)) {
+			SPDK_ERRLOG("spdk_json_decode_object failed\n");
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+			return;
+		}
+	}
+	tgt = spdk_nvmf_get_tgt(req.tgt_name);
+	if (!tgt) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		goto cleanup;
+	}
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Out of memory");
+		goto cleanup;
+	}
+	/* Initialize context fields */
+	TAILQ_INIT(&ctx->buckets);
+	ctx->request = request;
+	ctx->reset_stats = req.reset;
+	ctx->verbose = req.verbose_stats;
+	ctx->supported = true;
+	if (req.nqn) {
+		ctx->req_nqn = strdup(req.nqn);
+		if (!ctx->req_nqn) {
+			SPDK_ERRLOG("Memory allocation failed for req_nqn\n");
+			spdk_jsonrpc_send_error_response(request,
+							SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							"Out of memory");
+			free(ctx);
+			goto cleanup;
+		}
+	}
+	if (req.host_nqn) {
+		ctx->req_host_nqn = strdup(req.host_nqn);
+		if (!ctx->req_host_nqn) {
+			SPDK_ERRLOG("Memory allocation failed for req_nqn\n");
+			spdk_jsonrpc_send_error_response(request,
+							SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							"Out of memory");
+			free(ctx->req_nqn);
+			free(ctx);
+			goto cleanup;
+		}
+	}
+	/* subsystem and controller lookup loop not need since filtering happens during channel iteration */
+	SPDK_NOTICELOG("RPC starting for_each_channel ctx=%p tgt=%s verbose=%d reset? %d\n",
+		       ctx, req.tgt_name, ctx->verbose, ctx->reset_stats);
+	spdk_for_each_channel(tgt, rpc_collect_qp_stats, ctx, rpc_collect_done);
+
+cleanup:
+	free_rpc_nvmf_get_ctrl_io_stats(&req);
+}
+
+SPDK_RPC_REGISTER("nvmf_get_ctrl_io_stats", rpc_nvmf_get_ctrl_io_stats, SPDK_RPC_RUNTIME)
+
+static const struct spdk_json_object_decoder rpc_nvmf_enable_ctrl_io_stats_decoders[] = {
+	{"trtype", offsetof(struct rpc_nvmf_enable_ctrl_io_stats_ctx, trtype), spdk_json_decode_string, true},
+	{"tgt_name", offsetof(struct rpc_nvmf_enable_ctrl_io_stats_ctx, tgt_name), spdk_json_decode_string, true},
+	{"enable", offsetof(struct rpc_nvmf_enable_ctrl_io_stats_ctx, enable), spdk_json_decode_bool, true}
+};
+
+struct rpc_reset_all_ctrls_stats_ctx {
+	struct spdk_jsonrpc_request *request;
+	char *tgt_name;
+	bool  enable;
+	char *trtype;
+};
+
+static void
+rpc_reset_qp_stats(struct spdk_io_channel_iter *i)
+{
+	struct spdk_nvmf_poll_group *pg;
+	struct spdk_nvmf_qpair *qpair;
+
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	if (!ch) {
+		spdk_for_each_channel_continue(i, -ENOMEM);
+		return;
+	}
+	pg = spdk_io_channel_get_ctx(ch);
+	TAILQ_FOREACH(qpair, &pg->qpairs, link) {
+		if (qpair->ctrlr) {
+			struct qp_io_stats *stats = NULL;
+			if (qpair->transport->ops->get_qp_statistics) {
+				qpair->transport->ops->get_qp_statistics(qpair, (void **)&stats, true);
+			}
+			if (stats == NULL) {
+				continue;
+			}
+			SPDK_NOTICELOG("reset statistics for qp %p\n",qpair);
+			spdk_nvmf_stats_reset_qp(stats);
+		}
+	}
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+rpc_reset_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct rpc_reset_all_ctrls_stats_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_json_write_ctx *w;
+
+	w = spdk_jsonrpc_begin_result(ctx->request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "trtype", ctx->trtype);
+	spdk_json_write_named_bool(w, "enabled", ctx->enable);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(ctx->request, w);
+	free(ctx->trtype);
+	free(ctx->tgt_name);
+	free(ctx);
+}
+
+static void
+rpc_nvmf_enable_ctrl_io_stats(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_enable_ctrl_io_stats_ctx req = {};
+	struct spdk_nvmf_tgt *tgt;
+	if (params) {
+		if (spdk_json_decode_object(params, rpc_nvmf_enable_ctrl_io_stats_decoders,
+					SPDK_COUNTOF(rpc_nvmf_enable_ctrl_io_stats_decoders),
+					&req)) {
+			SPDK_ERRLOG("spdk_json_decode_object failed\n");
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+			return;
+		}
+	}
+	tgt = spdk_nvmf_get_tgt(req.tgt_name);
+	if (!tgt) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		goto cleanup;
+	}
+	/* find a transport ops and set  enable value*/
+	if (req.trtype) {
+			struct spdk_nvmf_transport * transport = spdk_nvmf_tgt_get_transport(tgt, req.trtype);
+			if (transport == NULL) {
+				SPDK_ERRLOG("transport '%s' does not exist\n", req.trtype);
+				spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+				goto cleanup;
+			}
+			if (transport->ops->enable_qp_statistics) {
+				transport->ops->enable_qp_statistics(req.enable);
+				/* for all created controllers reset qp statistics*/
+				if (req.enable == false) {
+					struct rpc_reset_all_ctrls_stats_ctx *ctx = calloc(1, sizeof(*ctx));
+					if (!ctx) {
+						spdk_jsonrpc_send_error_response(request,
+								SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+								"Out of memory");
+						goto cleanup;
+					}
+					ctx->request = request;
+					ctx->tgt_name = req.tgt_name;
+					ctx->trtype = req.trtype;
+					ctx->enable = req.enable;
+					spdk_for_each_channel(tgt, rpc_reset_qp_stats, ctx, rpc_reset_done);
+					return;
+				}
+				else {
+					struct spdk_json_write_ctx *w;
+					w = spdk_jsonrpc_begin_result(request);
+					spdk_json_write_object_begin(w);
+					spdk_json_write_named_string(w, "trtype", req.trtype);
+					spdk_json_write_named_bool(w, "enabled", req.enable);
+					spdk_json_write_object_end(w);
+					spdk_jsonrpc_end_result(request, w);
+				}
+			}
+			else {
+				spdk_jsonrpc_send_error_response(request,
+				-ENOTSUP,
+				"Transport does not support QP statistics");
+			}
+	}
+cleanup:
+	free_rpc_nvmf_enable_ctrl_io_stats(&req);
+}
+
+SPDK_RPC_REGISTER("nvmf_enable_ctrl_io_stats", rpc_nvmf_enable_ctrl_io_stats, SPDK_RPC_RUNTIME)
 
 struct rpc_subsystem_create {
 	char *nqn;
