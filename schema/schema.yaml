@@ -3678,6 +3678,37 @@ methods:
       - name: tgt_name
         type: string
         description: Parent NVMe-oF target name
+  - name: nvmf_get_ctrl_io_stats
+    description: "Display IO statistics for a specific NVMe-oF controller"
+    params:
+      - name: tgt_name
+        type: string
+        description: Parent NVMe-oF target name
+      - name: nqn
+        type: string
+        description: Subsystem NQN
+      - name: host_nqn
+        type: string
+        description: Host NQN
+      - name: reset
+        type: boolean
+        description: Reset NVMf IO statistics of controller
+      - name: verbose_stats
+        type: boolean
+        description: Enable verbose per-bucket statistics
+  - name: nvmf_enable_ctrl_io_stats
+    description: "Enable/disable IO statistics for a specific NVMe-oF controller"
+    params:
+      - name: tgt_name
+        type: string
+        description: Parent NVMe-oF target name
+      - name: trtype
+        type: string
+        required: true
+        description: Transport type (ex. RDMA)
+      - name: enable
+        type: boolean
+        description: Enable statistics of the controller
   - name: nvmf_create_subsystem
     description: Construct an NVMe over Fabrics target subsystem.
     result:
