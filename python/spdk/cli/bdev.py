@@ -894,7 +894,9 @@ def add_parser(subparsers):
                                             cluster_name=args.cluster_name,
                                             namespace_name=args.namespace_name,
                                             uuid=args.uuid,
-                                            read_only=args.read_only))
+                                            read_only=args.read_only,
+                                            encryption_format=args.encryption_format,
+                                            passphrase=args.passphrase))
 
     p = subparsers.add_parser('bdev_rbd_create', help='Add a bdev with ceph rbd backend')
     p.add_argument('-b', '--name', help="Name of the bdev")
@@ -908,6 +910,8 @@ def add_parser(subparsers):
     p.add_argument('-c', '--cluster-name', help="cluster name to identify the Rados cluster")
     p.add_argument('-u', '--uuid', help="UUID of the bdev")
     p.add_argument('-r', '--readonly', dest='read_only', action='store_true', help='Set this bdev as read-only')
+    p.add_argument('-e', '--encryption-format', nargs='+', help="Encryption format(s) of the bdev")
+    p.add_argument('-p', '--passphrase', nargs='+', help="Pass phrase(s) for encrypted bdevs")
     p.set_defaults(func=bdev_rbd_create)
 
     def bdev_rbd_delete(args):
