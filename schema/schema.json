@@ -601,6 +601,16 @@
       "name": "raid_base_bdevs",
       "item_type": "string",
       "max_count": 255
+    },
+    {
+      "name": "encryption_format",
+      "item_type": "uint32",
+      "max_count": 255
+    },
+    {
+      "name": "passphrase",
+      "item_type": "string",
+      "max_count": 255
     }
   ],
   "methods": [
@@ -2648,6 +2658,20 @@
           "name": "read_only",
           "type": "boolean",
           "description": "set rbd bdev as read-only"
+        },
+        {
+          "name": "encryption_format",
+          "type": "array",
+          "class": "encryption_format",
+          "required": false,
+          "description": "encryption format(s) for bdev"
+        },
+        {
+          "name": "passphrase",
+          "type": "array",
+          "class": "passphrase",
+          "required": false,
+          "description": "passphrase(s) for encrypted bdevs"
         }
       ]
     },
