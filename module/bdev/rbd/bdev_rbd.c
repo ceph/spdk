@@ -47,6 +47,9 @@ struct bdev_rbd {
 	char *user_id;
 	char *pool_name;
 	char *namespace_name;
+	uint32_t encryption_entries_count;
+	uint32_t *encryption_format;
+	char **passphrase;
 	char **config;
 
 	rados_t cluster;
@@ -231,6 +234,8 @@ bdev_rbd_free(struct bdev_rbd *rbd)
 	free(rbd->user_id);
 	free(rbd->pool_name);
 	free(rbd->namespace_name);
+	free(rbd->encryption_format);
+	bdev_rbd_free_passphrase(rbd->passphrase);
 	bdev_rbd_free_config(rbd->config);
 
 	if (rbd->cluster_name) {
@@ -288,6 +293,19 @@ bdev_rbd_dup_config(const char *const *config)
 		}
 	}
 	return copy;
+}
+
+void
+bdev_rbd_free_passphrase(char **passphrase)
+{
+	char **entry;
+
+	if (passphrase) {
+		for (entry = passphrase; *entry; entry++) {
+			free(*entry);
+		}
+		free(passphrase);
+	}
 }
 
 static int
@@ -461,6 +479,61 @@ err_handle:
 	return -1;
 }
 
+static void
+bdev_rbd_free_encryption_specs(rbd_encryption_spec_t *specs, uint32_t count)
+{
+	uint32_t i;
+
+	if (!specs)
+		return;
+
+	for (i = 0; i < count; i++) {
+		if (specs[i].format == RBD_ENCRYPTION_FORMAT_LUKS1) {
+			free((void *)(((rbd_encryption_luks1_format_options_t *)specs[i].opts)->passphrase));
+		}
+		else if (specs[i].format == RBD_ENCRYPTION_FORMAT_LUKS2) {
+			free((void *)(((rbd_encryption_luks2_format_options_t *)specs[i].opts)->passphrase));
+		}
+		else if (specs[i].format == RBD_ENCRYPTION_FORMAT_LUKS) {
+			free((void *)(((rbd_encryption_luks_format_options_t *)specs[i].opts)->passphrase));
+		}
+		free(specs[i].opts);
+	}
+	free(specs);
+}
+
+static int
+bdev_rbd_set_passphrase(char **out, size_t *phrasesize, const char *phrase)
+{
+	*out = strdup(phrase);
+	if (!*out) {
+		SPDK_ERRLOG("Cannot allocate memory for encryption pass phrase\n");
+		return -1;
+	}
+	*phrasesize = strlen(phrase);
+	return 0;
+}
+
+#define SET_ENC_ENTRY(_specs, _rbd, _index, _fstring, _fmt, _upfmt)                                                    \
+if ((_rbd)->encryption_format[_index] == RBD_ENCRYPTION_FORMAT_##_upfmt ) {                                            \
+	rbd_encryption_##_fmt##_format_options_t *opts;                                                                \
+	strcat(_fstring, #_upfmt " ");                                                                                 \
+	opts = calloc(1, sizeof(*opts));                                                                               \
+	if (!opts) {                                                                                                   \
+		SPDK_ERRLOG("Cannot allocate memory for encryption format options\n");                                 \
+		bdev_rbd_free_encryption_specs(_specs, (_rbd)->encryption_entries_count);                              \
+		return NULL;                                                                                           \
+	}                                                                                                              \
+	if (bdev_rbd_set_passphrase((char **)&opts->passphrase, &opts->passphrase_size, (_rbd->passphrase[_index]))) { \
+		free((char *)opts->passphrase);                                                                        \
+		free(opts);                                                                                            \
+		bdev_rbd_free_encryption_specs(_specs, (_rbd)->encryption_entries_count);                              \
+		return NULL;                                                                                           \
+	}                                                                                                              \
+	_specs[_index].opts = (rbd_encryption_options_t)opts;                                                          \
+	_specs[_index].opts_size = sizeof(*opts);                                                                      \
+}
+
 static void *
 bdev_rbd_init_context(void *arg)
 {
@@ -498,7 +571,50 @@ bdev_rbd_init_context(void *arg)
 	}
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to open specified rbd device\n");
+		rbd->image = NULL;
 		return NULL;
+	}
+
+	if (rbd->encryption_entries_count > 0) {
+		uint32_t i;
+		rbd_encryption_spec_t *specs;
+		char *formats_string;
+
+		formats_string = calloc(rbd->encryption_entries_count, strlen("LUKSx") + 1);
+		if (!formats_string) {
+			SPDK_ERRLOG("Cannot allocate memory for encryption formats string\n");
+			return NULL;
+		}
+		specs = calloc(rbd->encryption_entries_count, sizeof(*specs));
+		if (!specs) {
+			SPDK_ERRLOG("Cannot allocate memory for encryption specs\n");
+			free(formats_string);
+			return NULL;
+		}
+		for (i = 0; i < rbd->encryption_entries_count; i++) {
+			specs[i].format = rbd->encryption_format[i];
+			SET_ENC_ENTRY(specs, rbd, i, formats_string, luks1, LUKS1)
+			SET_ENC_ENTRY(specs, rbd, i, formats_string, luks2, LUKS2)
+			SET_ENC_ENTRY(specs, rbd, i, formats_string, luks, LUKS)
+			if (!specs[i].opts) {
+				SPDK_ERRLOG("Invalid encryption format %d\n", rbd->encryption_format[i]);
+				bdev_rbd_free_encryption_specs(specs, rbd->encryption_entries_count);
+				free(formats_string);
+				return NULL;
+			}
+		}
+
+		SPDK_DEBUGLOG(bdev_rbd, "Will use encryption load for image %s/%s, using encryption format(s) %s\n",
+				rbd->pool_name, rbd->rbd_name, formats_string);
+		rc = rbd_encryption_load2(rbd->image, specs, rbd->encryption_entries_count);
+		bdev_rbd_free_encryption_specs(specs, rbd->encryption_entries_count);
+		if (rc != 0) {
+			SPDK_ERRLOG("Error %d trying to encryption load image %s/%s using format(s) %s\n", rc,
+					rbd->pool_name, rbd->rbd_name, formats_string);
+			free(formats_string);
+			return NULL;
+		}
+		free(formats_string);
 	}
 
 	rc = rbd_update_watch(rbd->image, &rbd->rbd_watch_handle, rbd_update_callback, (void *)rbd);
@@ -1061,6 +1177,27 @@ bdev_rbd_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w
 		spdk_json_write_named_string(w, "user_id", rbd->user_id);
 	}
 
+	if (rbd->encryption_format && rbd->encryption_entries_count > 0) {
+		uint32_t i;
+
+		spdk_json_write_named_object_begin(w, "encryption_format");
+		for (i = 0; i < rbd->encryption_entries_count; i++) {
+			spdk_json_write_uint32(w, rbd->encryption_format[i]);
+		}
+		spdk_json_write_object_end(w);
+	}
+
+	if (rbd->passphrase && rbd->encryption_entries_count > 0) {
+		uint32_t i;
+
+		spdk_json_write_named_object_begin(w, "passphrase");
+		for (i = 0; i < rbd->encryption_entries_count; i++) {
+			/* souldn't write the real pass phrase, it's a security breach */
+			spdk_json_write_string(w, "*");
+		}
+		spdk_json_write_object_end(w);
+	}
+
 	if (rbd->config) {
 		char **entry = rbd->config;
 
@@ -1499,10 +1636,14 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		uint32_t block_size,
 		const char *cluster_name,
 		const struct spdk_uuid *uuid,
-		bool read_only)
+		bool read_only,
+		uint32_t encryption_entries_count,
+		const uint32_t *encryption_format,
+		const char **passphrase)
 {
 	struct bdev_rbd *rbd;
 	int ret;
+	uint32_t i;
 
 	if ((pool_name == NULL) || (rbd_name == NULL) || (block_size == 0)) {
 		return -EINVAL;
@@ -1546,6 +1687,28 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		if (!rbd->namespace_name) {
 			bdev_rbd_free(rbd);
 			return -ENOMEM;
+		}
+	}
+
+	rbd->encryption_entries_count = encryption_entries_count;
+	if (encryption_entries_count > 0) {
+		rbd->encryption_format = calloc(encryption_entries_count, sizeof(uint32_t));
+		if (!rbd->encryption_format) {
+			bdev_rbd_free(rbd);
+			return -ENOMEM;
+		}
+		rbd->passphrase = calloc(encryption_entries_count + 1, sizeof(char *));
+		if (!rbd->passphrase) {
+			bdev_rbd_free(rbd);
+			return -ENOMEM;
+		}
+		for (i = 0; i < encryption_entries_count; i++) {
+			rbd->encryption_format[i] = encryption_format[i];
+			rbd->passphrase[i] = strdup(passphrase[i]);
+			if (!rbd->passphrase[i]) {
+				bdev_rbd_free(rbd);
+				return -ENOMEM;
+			}
 		}
 	}
 
