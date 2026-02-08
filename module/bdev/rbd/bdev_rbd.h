@@ -23,15 +23,17 @@ struct cluster_register_info {
 void dump_cluster_nonce(struct spdk_json_write_ctx *w, const char *name);
 void bdev_rbd_free_config(char **config);
 char **bdev_rbd_dup_config(const char *const *config);
+void bdev_rbd_free_passphrase(char **passphrase);
 
 typedef void (*spdk_delete_rbd_complete)(void *cb_arg, int bdeverrno);
 
 int bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
-		    const char *pool_name,
-			const char *namespace_name,
+		    const char *pool_name, const char *namespace_name,
 		    const char *const *config,
 		    const char *rbd_name, uint32_t block_size, const char *cluster_name,
-		    const struct spdk_uuid *uuid, bool read_only);
+		    const struct spdk_uuid *uuid, bool read_only,
+		    uint32_t encryption_entries_count,
+		    const uint32_t *encryption_format, const char **passphrase);
 /**
  * Delete rbd bdev.
  *
