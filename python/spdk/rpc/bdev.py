@@ -1093,7 +1093,7 @@ def bdev_rbd_get_clusters_info(client, name=None):
 
 @deprecated_method
 def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=None, config=None, cluster_name=None,
-                    namespace_name=None, uuid=None, read_only=None):
+                    namespace_name=None, uuid=None, read_only=None, encryption_format=None, passphrase=None):
     """Create a Ceph RBD block device.
     Args:
         pool_name: Ceph RBD pool name
@@ -1106,6 +1106,8 @@ def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=
         namespace_name: RBD namespace name (optional)
         uuid: UUID of block device (optional)
         read_only: set block device to read-only (optional)
+        encryption_format: encryption format to use (optional)
+        passphrase: pass phrase to use (optional)
     Returns:
         Name of created block device.
     """
@@ -1129,6 +1131,10 @@ def bdev_rbd_create(client, pool_name, rbd_name, block_size, name=None, user_id=
         params['uuid'] = uuid
     if read_only is not None:
         params['read_only'] = read_only
+    if encryption_format is not None:
+        params['encryption_format'] = encryption_format
+    if passphrase is not None:
+        params['passphrase'] = passphrase
     return client.call('bdev_rbd_create', params)
 
 
