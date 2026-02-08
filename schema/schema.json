@@ -2268,6 +2268,18 @@
           "name": "read_only",
           "type": "boolean",
           "description": "set rbd bdev as read-only"
+        },
+        {
+          "name": "encryption_format",
+          "type": "array",
+          "required": false,
+          "description": "encryption format(s) for bdev"
+        },
+        {
+          "name": "passphrase",
+          "type": "array",
+          "required": false,
+          "description": "passphrase(s) for encrypted bdevs"
         }
       ]
     },
