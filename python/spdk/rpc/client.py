@@ -249,6 +249,8 @@ class JSONRPCClient(JSONRPCAbstractClient):
         if 'error' in response:
             params["method"] = method
             params["req_id"] = req_id
+            if params.get("passphrase"):
+                params["passphrase"] = "*"
             msg = "\n".join(["request:", "%s" % json.dumps(params, indent=2),
                              "Got JSON-RPC error response",
                              "response:",
