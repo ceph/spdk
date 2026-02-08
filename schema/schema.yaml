@@ -723,6 +723,12 @@ arrays:
   - name: raid_base_bdevs
     item_type: string
     max_count: 255
+  - name: encryption_format
+    item_type: uint32
+    max_count: 255
+  - name: passphrase
+    item_type: string
+    max_count: 255
 bitmasks:
   - name: dhchap_digests
     enum: dhchap_digest
@@ -2512,6 +2518,14 @@ methods:
       - name: read_only
         type: boolean
         description: set rbd bdev as read-only
+      - name: encryption_format
+        type: array
+        class: encryption_format
+        description: encryption format(s) for bdev
+      - name: passphrase
+        type: array
+        class: passphrase
+        description: passphrase(s) for encrypted bdevs
   - name: bdev_rbd_get_with_crc32c
     description: |
       Get the state of CRC32 usage in RBD
