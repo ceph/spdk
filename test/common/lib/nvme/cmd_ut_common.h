@@ -34,4 +34,22 @@ ut_qpair_cleanup(struct spdk_nvme_qpair *qpair)
 	free(qpair->req_buf);
 }
 
+static inline void
+ut_req_cleanup(struct nvme_request **req)
+{
+	if (*req != NULL) {
+		nvme_free_request(*req);
+		*req = NULL;
+	}
+}
+
+static inline void
+ut_user_req_cleanup(struct nvme_request **req)
+{
+	if (*req != NULL) {
+		nvme_cleanup_user_req(*req);
+	}
+	ut_req_cleanup(req);
+}
+
 #endif /* SPDK_NVME_CMD_UT_COMMON_H */
