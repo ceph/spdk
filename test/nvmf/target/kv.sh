@@ -4,9 +4,10 @@
 #
 # Functional test for NVMe Key-Value command set over NVMe-oF/TCP.
 # This test:
-#   1) Starts an SPDK NVMe-oF/TCP target with a bdev_kvmalloc device
-#   2) Connects to the target using the kernel nvme driver (nvme-cli)
-#   3) Gets identify data using nvme id-ctrl and nvme id-ns
+#   1) Starts an SPDK NVMe-oF target with a bdev_kvmalloc device
+#   2) Runs spdk_nvme_perf against the target via loopback (KV store/retrieve)
+#   3) Connects to the target using the kernel nvme driver (nvme-cli)
+#   4) Gets identify data using nvme id-ctrl and nvme id-ns
 
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../../..")
@@ -69,6 +70,14 @@ $rpc_py nvmf_subsystem_add_listener "$NVMF_KV_SUBNQN" -t $TEST_TRANSPORT -a $NVM
 
 # Show subsystem info
 $rpc_py nvmf_get_subsystems
+
+echo "=== Running spdk_nvme_perf against KV target (loopback) ==="
+perf_r="trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT subnqn:$NVMF_KV_SUBNQN"
+run_app "$SPDK_BIN_DIR/spdk_nvme_perf" -q 4 -o 4096 -w randrw -M 50 -t 2 \
+	-r "$perf_r" || {
+	echo "ERROR: spdk_nvme_perf against KV target failed"
+	exit 1
+}
 
 echo "=== Connecting to NVMe-oF KV target ==="
 nvme connect "${NVME_HOST[@]}" -t $TEST_TRANSPORT -n "$NVMF_KV_SUBNQN" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
