@@ -12,6 +12,7 @@
 #include "spdk/env.h"
 #include "spdk/fd.h"
 #include "spdk/nvme.h"
+#include "spdk/nvme_kv.h"
 #include "spdk_internal/nvme_util.h"
 #include "spdk/vmd.h"
 #include "spdk/queue.h"
@@ -93,6 +94,11 @@ struct ns_entry {
 	enum spdk_nvme_pi_type	pi_type;
 	uint32_t		io_flags;
 	char			name[1024];
+	/* KV namespace specific fields */
+	bool			is_kv_namespace;
+	uint8_t			kv_max_key_size;
+	uint32_t		kv_max_value_size;
+	uint32_t		kv_num_keys;
 };
 
 static const double g_latency_cutoffs[] = {
@@ -168,6 +174,10 @@ struct ns_worker_ctx {
 
 	struct spdk_histogram_data	*histogram;
 	int				status;
+	/* KV namespace specific fields */
+	unsigned			kv_thread_num;
+	bool				kv_keys_prepopulated;
+	uint32_t			kv_prepopulate_pending;
 };
 
 struct perf_task {
@@ -1170,12 +1180,197 @@ nvme_dump_transport_stats(uint32_t lcore, struct ns_worker_ctx *ns_ctx)
 	spdk_nvme_poll_group_free_stats(group, stat);
 }
 
+/* Generate a KV key string in format "<thread_num>_<queue_num>_<slot>" */
+static void
+generate_kv_key(char *key_buf, uint8_t max_key_size, unsigned thread_num,
+		int queue_num, uint32_t slot)
+{
+	int len;
+
+	len = snprintf(key_buf, max_key_size, "%u_%d_%u", thread_num, queue_num, slot);
+	if (len >= max_key_size) {
+		len = max_key_size - 1;
+	}
+	/* Pad remaining bytes with zeros */
+	memset(key_buf + len, 0, max_key_size - len);
+}
+
+static int
+kv_submit_io(struct perf_task *task, struct ns_worker_ctx *ns_ctx,
+	     struct ns_entry *entry, uint64_t offset_in_ios)
+{
+	int qp_num;
+	uint32_t key_slot;
+	char key[16];
+	uint8_t key_len;
+	int rc;
+
+	qp_num = ns_ctx->u.nvme.last_qpair;
+	ns_ctx->u.nvme.last_qpair++;
+	if (ns_ctx->u.nvme.last_qpair == ns_ctx->u.nvme.num_active_qpairs) {
+		ns_ctx->u.nvme.last_qpair = 0;
+	}
+
+	/* Calculate which key slot to use (cycle through available keys) */
+	key_slot = offset_in_ios % entry->kv_num_keys;
+
+	/* Generate key string */
+	generate_kv_key(key, entry->kv_max_key_size, ns_ctx->kv_thread_num,
+			qp_num, key_slot);
+	key_len = strlen(key);
+	if (key_len > entry->kv_max_key_size) {
+		key_len = entry->kv_max_key_size;
+	}
+
+	if (task->is_read) {
+		/* KV RETRIEVE */
+		rc = spdk_nvme_kv_retrieve(entry->u.nvme.ns, ns_ctx->u.nvme.qpair[qp_num],
+					   key, key_len,
+					   task->iovs[0].iov_base, g_io_size_bytes,
+					   io_complete, task, 0);
+	} else {
+		/* KV STORE */
+		rc = spdk_nvme_kv_store(entry->u.nvme.ns, ns_ctx->u.nvme.qpair[qp_num],
+					key, key_len,
+					task->iovs[0].iov_base, g_io_size_bytes,
+					io_complete, task, 0);
+	}
+
+	return rc;
+}
+
+static void
+kv_prepopulate_complete(void *ctx, const struct spdk_nvme_cpl *cpl)
+{
+	struct ns_worker_ctx *ns_ctx = ctx;
+
+	if (spdk_nvme_cpl_is_error(cpl)) {
+		fprintf(stderr, "KV pre-population store failed: %s\n",
+			spdk_nvme_cpl_get_status_string(&cpl->status));
+		ns_ctx->status = 1;
+	}
+
+	ns_ctx->kv_prepopulate_pending--;
+}
+
+static int
+kv_prepopulate_keys(struct ns_worker_ctx *ns_ctx)
+{
+	struct ns_entry *entry = ns_ctx->entry;
+	void *prepop_buf;
+	uint32_t i;
+	int qp_num;
+	char key[16];
+	uint8_t key_len;
+	int rc;
+	uint8_t pattern = 0x5a;
+	struct spdk_nvme_ctrlr *ctrlr;
+	int32_t numa_id;
+
+	if (ns_ctx->kv_keys_prepopulated) {
+		return 0;
+	}
+
+	/* Allocate a buffer for pre-population */
+	ctrlr = entry->u.nvme.ctrlr;
+	numa_id = spdk_nvme_ctrlr_get_numa_id(ctrlr);
+	prepop_buf = spdk_dma_zmalloc_socket(g_io_size_bytes, g_io_align, NULL, numa_id);
+	if (!prepop_buf) {
+		fprintf(stderr, "Failed to allocate buffer for KV pre-population\n");
+		return -1;
+	}
+	memset(prepop_buf, pattern, g_io_size_bytes);
+
+	ns_ctx->kv_prepopulate_pending = entry->kv_num_keys;
+
+	/* Pre-populate all keys */
+	for (i = 0; i < entry->kv_num_keys; i++) {
+		qp_num = i % ns_ctx->u.nvme.num_active_qpairs;
+
+		/* Generate key string */
+		generate_kv_key(key, entry->kv_max_key_size, ns_ctx->kv_thread_num,
+				qp_num, i);
+		key_len = strlen(key);
+		if (key_len > entry->kv_max_key_size) {
+			key_len = entry->kv_max_key_size;
+		}
+
+		/* Submit KV STORE command */
+		rc = spdk_nvme_kv_store(entry->u.nvme.ns, ns_ctx->u.nvme.qpair[qp_num],
+					key, key_len,
+					prepop_buf, g_io_size_bytes,
+					kv_prepopulate_complete, ns_ctx, 0);
+		if (rc != 0) {
+			fprintf(stderr, "Failed to submit KV pre-population store: %d\n", rc);
+			ns_ctx->kv_prepopulate_pending--;
+		}
+	}
+
+	/* Wait for all pre-population stores to complete */
+	while (ns_ctx->kv_prepopulate_pending > 0 && ns_ctx->status == 0) {
+		nvme_check_io(ns_ctx);
+		spdk_delay_us(100);
+	}
+
+	/* Free the pre-population buffer */
+	spdk_dma_free(prepop_buf);
+
+	if (ns_ctx->status != 0) {
+		return -1;
+	}
+
+	ns_ctx->kv_keys_prepopulated = true;
+	return 0;
+}
+
+static int
+kv_init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
+{
+	int rc;
+	bool needs_prepopulate = false;
+
+	/* Initialize KV-specific fields */
+	ns_ctx->kv_keys_prepopulated = false;
+	ns_ctx->kv_prepopulate_pending = 0;
+
+	/* Call standard NVMe init first */
+	rc = nvme_init_ns_worker_ctx(ns_ctx);
+	if (rc != 0) {
+		return rc;
+	}
+
+	/* Determine if we need to pre-populate keys */
+	/* Pre-populate if workload includes reads (retrieve operations) */
+	if (g_rw_percentage > 0) {
+		needs_prepopulate = true;
+	}
+
+	if (needs_prepopulate) {
+		rc = kv_prepopulate_keys(ns_ctx);
+		if (rc != 0) {
+			return rc;
+		}
+	}
+
+	return 0;
+}
+
 static const struct ns_fn_table nvme_fn_table = {
 	.setup_payload		= nvme_setup_payload,
 	.submit_io		= nvme_submit_io,
 	.check_io		= nvme_check_io,
 	.verify_io		= nvme_verify_io,
 	.init_ns_worker_ctx	= nvme_init_ns_worker_ctx,
+	.cleanup_ns_worker_ctx	= nvme_cleanup_ns_worker_ctx,
+	.dump_transport_stats	= nvme_dump_transport_stats
+};
+
+static const struct ns_fn_table kv_nvme_fn_table = {
+	.setup_payload		= nvme_setup_payload,
+	.submit_io		= kv_submit_io,
+	.check_io		= nvme_check_io,
+	.verify_io		= nvme_verify_io,
+	.init_ns_worker_ctx	= kv_init_ns_worker_ctx,
 	.cleanup_ns_worker_ctx	= nvme_cleanup_ns_worker_ctx,
 	.dump_transport_stats	= nvme_dump_transport_stats
 };
@@ -1236,9 +1431,29 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	}
 
 	entry->type = ENTRY_TYPE_NVME_NS;
-	entry->fn_table = &nvme_fn_table;
 	entry->u.nvme.ctrlr = ctrlr;
 	entry->u.nvme.ns = ns;
+
+	/* Check if this is a KV namespace */
+	entry->is_kv_namespace = false;
+	if (spdk_nvme_ns_get_csi(ns) == SPDK_NVME_CSI_KV) {
+		const struct spdk_nvme_kv_ns_data *kv_ns_data;
+
+		entry->is_kv_namespace = true;
+		kv_ns_data = spdk_nvme_kv_ns_get_data(ns);
+		if (kv_ns_data) {
+			uint8_t fmt_idx = kv_ns_data->kvfc.kvfi;
+
+			entry->kv_max_key_size = kv_ns_data->kvf[fmt_idx].kvkml;
+			entry->kv_max_value_size = kv_ns_data->kvf[fmt_idx].kvvml;
+		} else {
+			/* Default values if KV data not available */
+			entry->kv_max_key_size = 16;
+			entry->kv_max_value_size = g_io_size_bytes;
+		}
+		/* Calculate number of keys to pre-populate based on queue depth */
+		entry->kv_num_keys = g_queue_depth * g_nr_io_queues_per_ns;
+	}
 	entry->num_io_requests = entries * spdk_divide_round_up(g_queue_depth, g_nr_io_queues_per_ns);
 
 	entry->size_in_ios = ns_size / g_io_size_bytes;
@@ -1291,6 +1506,13 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	}
 
 	spdk_nvme_build_name(entry->name, sizeof(entry->name), ctrlr, ns);
+
+	/* Set function table based on namespace type */
+	if (entry->is_kv_namespace) {
+		entry->fn_table = &kv_nvme_fn_table;
+	} else {
+		entry->fn_table = &nvme_fn_table;
+	}
 
 	g_num_namespaces++;
 	TAILQ_INSERT_TAIL(&g_namespaces, entry, link);
@@ -3084,6 +3306,7 @@ allocate_ns_worker(struct ns_entry *entry, struct worker_thread *worker)
 	ns_ctx->stats.min_tsc = UINT64_MAX;
 	ns_ctx->entry = entry;
 	ns_ctx->histogram = spdk_histogram_data_alloc();
+	ns_ctx->kv_thread_num = worker->lcore;
 	if (g_number_ios_percent > 0) {
 		ns_ctx->number_ios = entry->size_in_ios * g_number_ios_percent / 100;
 		printf("number_ios for namespace %s set to %lu (%d%% of namespace size)\n",
