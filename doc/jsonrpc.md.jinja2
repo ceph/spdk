@@ -3561,6 +3561,81 @@ Example response:
 }
 ~~~
 
+### bdev_kvmalloc_create {#rpc_bdev_kvmalloc_create}
+
+Construct a Key-Value bdev backed by malloc memory. This bdev reports support for the NVMe KV
+command set and handles Store, Retrieve, Delete, Exist, and List commands using an in-memory
+RB tree. It is intended for testing and development purposes.
+
+#### Parameters
+
+{{ bdev_kvmalloc_create_params }}
+
+#### Response
+
+Name of newly created bdev.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "name": "KVMalloc0",
+    "max_key_size": 16,
+    "max_value_size": 131072,
+    "optimal_value_granularity": 4096
+  },
+  "jsonrpc": "2.0",
+  "method": "bdev_kvmalloc_create",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "KVMalloc0"
+}
+~~~
+
+### bdev_kvmalloc_delete {#rpc_bdev_kvmalloc_delete}
+
+Delete a Key-Value malloc bdev.
+
+#### Parameters
+
+{{ bdev_kvmalloc_delete_params }}
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "name": "KVMalloc0"
+  },
+  "jsonrpc": "2.0",
+  "method": "bdev_kvmalloc_delete",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ### bdev_malloc_create {#rpc_bdev_malloc_create}
 
 Construct @ref bdev_config_malloc
