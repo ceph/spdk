@@ -183,6 +183,25 @@ def add_parser(subparsers):
     p.add_argument('name', help='Name of OCF bdev')
     p.set_defaults(func=bdev_ocf_flush_status)
 
+    def bdev_kvmalloc_create(args):
+        params = strip_globals(vars(args))
+        print_json(args.client.bdev_kvmalloc_create(**params))
+    p = subparsers.add_parser('bdev_kvmalloc_create', help='Create a bdev with kvmalloc backend (KV command set)')
+    p.add_argument('-b', '--name', help="Name of the bdev")
+    p.add_argument('-u', '--uuid', help="UUID of the bdev (optional)")
+    p.add_argument('-k', '--max-key-size', type=int, help='Maximum key size in bytes')
+    p.add_argument('-v', '--max-value-size', type=int, help='Maximum value size in bytes')
+    p.add_argument('-o', '--optimal-value-granularity', type=int, help='Optimal value granularity in bytes')
+    p.add_argument('-n', '--numa-id', type=int, help='NUMA node ID where memory is allocated')
+    p.set_defaults(func=bdev_kvmalloc_create)
+
+    def bdev_kvmalloc_delete(args):
+        args.client.bdev_kvmalloc_delete(name=args.name)
+
+    p = subparsers.add_parser('bdev_kvmalloc_delete', help='Delete a kvmalloc disk')
+    p.add_argument('name', help='kvmalloc bdev name')
+    p.set_defaults(func=bdev_kvmalloc_delete)
+
     def bdev_malloc_create(args):
         num_blocks = (args.total_size * 1024 * 1024) // args.block_size
         print_json(args.client.bdev_malloc_create(
