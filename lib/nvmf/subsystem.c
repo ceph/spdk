@@ -2631,6 +2631,18 @@ spdk_nvmf_subsystem_add_ns_ext(struct spdk_nvmf_subsystem *subsystem, const char
 		}
 
 		subsystem->max_zone_append_size_kib = max_zone_append_size_kib;
+	} else if (spdk_bdev_get_nvme_csi(ns->bdev) == SPDK_NVME_CSI_KV) {
+		SPDK_DEBUGLOG(nvmf, "The added namespace is a Key-Value namespace.\n");
+		ns->csi = SPDK_NVME_CSI_KV;
+
+		for (transport = spdk_nvmf_transport_get_first(subsystem->tgt); transport;
+		     transport = spdk_nvmf_transport_get_next(transport)) {
+			if (transport->opts.disable_command_passthru) {
+				SPDK_ERRLOG("Cannot add KV namespace: transport %s has command passthru disabled.\n",
+					    transport->ops->name);
+				goto err;
+			}
+		}
 	}
 
 	first_ns = spdk_nvmf_subsystem_get_first_ns(subsystem);
