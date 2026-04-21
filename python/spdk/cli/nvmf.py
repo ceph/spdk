@@ -548,3 +548,17 @@ def add_parser(subparsers):
                               help='Stop publishing pull registration request through mdns')
     p.add_argument('-t', '--tgt-name', help='Parent NVMe-oF target name', type=str)
     p.set_defaults(func=nvmf_stop_mdns_prr)
+
+    def nvmf_cnc_set_config(args):
+        args.client.nvmf_cnc_set_config(
+                                         host_behav_support_cnc=args.host_behav_support_cnc,
+                                         rate_limit_bytes=args.rate_limit_bytes,
+                                         max_inflight=args.max_inflight,
+                                         chunk_nlb=args.chunk_nlb)
+
+    p = subparsers.add_parser('nvmf_cnc_set_config', help='Configure cross namespace copy by nvmeof TP4130')
+    p.add_argument('-s', '--host-behav-support-cnc', help='Support nvmf CNC feature',action='store_true')
+    p.add_argument('-r', '--rate-limit-bytes', help='number of commited rate limiter bytes', type=int, required=True)
+    p.add_argument('-m', '--max-inflight', help='number of maximum inflight chunks', type=int, required=True)
+    p.add_argument('-c', '--chunk-nlb', help='number of blocks in chunk', type=int, required=True)
+    p.set_defaults(func=nvmf_cnc_set_config)

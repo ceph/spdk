@@ -10352,6 +10352,34 @@ Example response:
 }
 ~~~
 
+### nvmf_cnc_set_config {#rpc_nvmf_cnc_set_config}
+
+{{ nvmf_cnc_set_config_description }}
+
+#### Parameters
+
+{{ nvmf_cnc_set_config_params }}
+
+#### Response
+
+{{ nvmf_cnc_set_config_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_cnc_set_config", "--host-behav-support-cnc", "--rate-limit-bytes", "100000000", "--max-inflight", "8", "--chunk-nlb", "512") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ### fsdev_aio_delete {#rpc_fsdev_aio_delete}
 
 {{ fsdev_aio_delete_description }}
