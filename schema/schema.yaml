@@ -5680,6 +5680,27 @@ methods:
       - name: skip_rw
         type: boolean
         description: 'Skip read and write operations and complete them immediately (for benchmarking). Default: false'
+  - name: nvmf_cnc_set_config
+    description: Configure cross namespace copy by nvmeof TP4130
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: host_behav_support_cnc
+        type: boolean
+        description: Support nvmf CNC feature
+      - name: rate_limit_bytes
+        type: uint64
+        required: true
+        description: number of commited rate limiter bytes
+      - name: max_inflight
+        type: uint32
+        required: true
+        description: number of maximum inflight chunks
+      - name: chunk_nlb
+        type: uint32
+        required: true
+        description: number of blocks in chunk
   - name: fsdev_aio_delete
     description: Delete an AIO fsdev.
     result:
