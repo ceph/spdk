@@ -21,6 +21,7 @@
 #include "spdk_internal/rpc_autogen.h"
 
 #include "nvmf_internal.h"
+#include "ctrlr_cnc.h"
 
 static int
 json_write_hex_str(struct spdk_json_write_ctx *w, const void *data, size_t size)
@@ -3592,3 +3593,48 @@ rpc_nvmf_stop_mdns_prr(struct spdk_jsonrpc_request *request,
 	free_rpc_nvmf_stop_mdns_prr(&req);
 }
 SPDK_RPC_REGISTER("nvmf_stop_mdns_prr", rpc_nvmf_stop_mdns_prr, SPDK_RPC_RUNTIME);
+
+/* Mapping template that tells SPDK how to match JSON strings to struct variables */
+static const struct spdk_json_object_decoder rpc_nvmf_cnc_set_config_decoders[] = {
+	{"host_behav_support_cnc", offsetof(struct rpc_nvmf_cnc_set_config_ctx, host_behav_support_cnc), spdk_json_decode_bool, true},
+	{"rate_limit_bytes", offsetof(struct rpc_nvmf_cnc_set_config_ctx, rate_limit_bytes), spdk_json_decode_uint64},
+	{"max_inflight", offsetof(struct rpc_nvmf_cnc_set_config_ctx, max_inflight), spdk_json_decode_uint32},
+	{"chunk_nlb", offsetof(struct rpc_nvmf_cnc_set_config_ctx, chunk_nlb), spdk_json_decode_uint32},
+};
+
+static void
+rpc_nvmf_cnc_set_config(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_cnc_set_config_ctx req = {};
+
+	/* Set default fallbacks to current global values in case user skips an option */
+
+	/* Parse incoming JSON request array parameters */
+	if (params && spdk_json_decode_object(params, rpc_nvmf_cnc_set_config_decoders,
+					      SPDK_COUNTOF(rpc_nvmf_cnc_set_config_decoders), &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		return;
+	}
+
+	/* Guard: Enforce runtime boundaries */
+	if (req.chunk_nlb == 0 || req.max_inflight == 0 || req.max_inflight > CNC_MAX_INFLIGHT) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Values out of bounds");
+		return;
+	}
+
+	/* Apply configurations globally (Safe because new commands copy these snapshots at birth) */
+
+	cnc_config_set(req.host_behav_support_cnc, req.rate_limit_bytes, req.max_inflight, req.chunk_nlb);
+
+	SPDK_NOTICELOG("CNC Config updated via RPC: supported %d, RateLimit=%lu Bytes, MaxInflight=%u, ChunkNLB=%u\n",
+		       req.host_behav_support_cnc, req.rate_limit_bytes, req.max_inflight, req.chunk_nlb);
+
+	/* Respond back to the spdk_rpc client with success confirmation */
+	struct spdk_json_write_ctx *w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, true);
+	spdk_jsonrpc_end_result(request, w);
+}
+
+/* Register the method name into the global SPDK RPC command listing interface */
+SPDK_RPC_REGISTER("nvmf_cnc_set_config", rpc_nvmf_cnc_set_config, SPDK_RPC_RUNTIME);

@@ -6558,6 +6558,35 @@
       ]
     },
     {
+     "name": "nvmf_cnc_set_config",
+     "params": [
+        {
+          "name": "host_behav_support_cnc",
+          "type": "boolean",
+          "required": false,
+          "description": "Support nvmf CNC feature"
+        },
+        {
+          "name": "rate_limit_bytes",
+          "type": "uint64",
+          "required": true,
+          "description": "number of commited rate limiter bytes"
+        },
+        {
+          "name": "max_inflight",
+          "type": "uint32",
+          "required": true,
+          "description": "number of maximum inflight chunks"
+        },
+        {
+          "name": "chunk_nlb",
+          "type": "uint32",
+          "required": true,
+          "description": "number of blocks in chunk"
+        }
+      ]
+    },
+    {
       "name": "fsdev_aio_delete",
       "params": [
         {
