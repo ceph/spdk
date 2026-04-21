@@ -1889,7 +1889,19 @@ struct spdk_nvme_host_behavior {
 	uint8_t lbafee;
 	uint8_t reserved[509];
 };
+
 SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_host_behavior) == 512, "Incorrect size");
+
+struct spdk_nvme_host_behavior_ext {
+    uint8_t  acre;          /* Byte 0 */
+    uint8_t  etdas;         /* Byte 1 */
+    uint8_t  lbafee;        /* Byte 2 */
+    uint8_t  hdisns;        /* Byte 3 */
+    uint16_t cdfe;          /* Bytes 4-5: Copy Descriptor Formats Enable */
+    uint8_t  reserved[506]; /* Bytes 6-511 */
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_host_behavior_ext) == 512, "Incorrect size");
+
 #pragma pack(pop)
 
 /**

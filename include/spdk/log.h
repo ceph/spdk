@@ -19,7 +19,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
+#define DEBUG 1
 #define SPDK_LOG_DEPRECATION_EVERY_24H	86400
 #define SPDK_LOG_DEPRECATION_ALWAYS	0
 
