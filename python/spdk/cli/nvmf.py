@@ -430,6 +430,7 @@ def add_parser(subparsers):
                                             nqn=args.nqn,
                                             host=args.host,
                                             tgt_name=args.tgt_name,
+                                            keep_connections=args.keep_connections,
                                             timeout_ms=args.timeout_ms)
 
     p = subparsers.add_parser('nvmf_subsystem_remove_host', help='Remove a host from an NVMe-oF subsystem')
@@ -439,6 +440,8 @@ def add_parser(subparsers):
     p.add_argument('-T', '--timeout-ms',
                    help='Timeout in ms to wait for I/Os to complete (optional). Default value is derived from the controller CAP.TO.',
                    type=int)
+    p.add_argument('--keep-connections', action='store_true',
+                   help='Do not disconnect existing connections from this host (optional)')
     p.set_defaults(func=nvmf_subsystem_remove_host)
 
     def nvmf_subsystem_set_keys(args):
