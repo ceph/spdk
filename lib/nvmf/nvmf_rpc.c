@@ -2492,6 +2492,7 @@ static const struct spdk_json_object_decoder rpc_nvmf_subsystem_remove_host_deco
 	{"nqn", offsetof(struct rpc_nvmf_subsystem_remove_host_ctx, nqn), spdk_json_decode_string},
 	{"host", offsetof(struct rpc_nvmf_subsystem_remove_host_ctx, host), spdk_json_decode_string},
 	{"tgt_name", offsetof(struct rpc_nvmf_subsystem_remove_host_ctx, tgt_name), spdk_json_decode_string, true},
+	{"keep_connections", offsetof(struct rpc_nvmf_subsystem_remove_host_ctx, keep_connections), spdk_json_decode_bool, true},
 	{"timeout_ms", offsetof(struct rpc_nvmf_subsystem_remove_host_ctx, timeout_ms), spdk_json_decode_uint64, true},
 };
 
@@ -2550,9 +2551,15 @@ rpc_nvmf_subsystem_remove_host(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	rc = spdk_nvmf_subsystem_disconnect_host(subsystem, ctx->host,
-			rpc_nvmf_subsystem_remove_host_done,
-			ctx, ctx->timeout_ms);
+	if (!ctx->keep_connections) {
+		rc = spdk_nvmf_subsystem_disconnect_host(subsystem, ctx->host,
+				rpc_nvmf_subsystem_remove_host_done,
+				ctx, ctx->timeout_ms);
+	}
+	else {
+		SPDK_INFOLOG(nvmf, "Will not disconnect connections from host %s\n", ctx->host);
+		rpc_nvmf_subsystem_remove_host_done(ctx, 0);
+	}
 	if (rc != 0) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
 		free_rpc_nvmf_subsystem_remove_host(ctx);
