@@ -2167,9 +2167,15 @@ rpc_nvmf_subsystem_remove_host(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	rc = spdk_nvmf_subsystem_disconnect_host(subsystem, ctx->host,
-			rpc_nvmf_subsystem_remove_host_done,
-			ctx, ctx->timeout_ms);
+	if (!ctx->keep_connections) {
+		rc = spdk_nvmf_subsystem_disconnect_host(subsystem, ctx->host,
+				rpc_nvmf_subsystem_remove_host_done,
+				ctx, ctx->timeout_ms);
+	}
+	else {
+		SPDK_INFOLOG(nvmf, "Will not disconnect connections from host %s\n", ctx->host);
+		rpc_nvmf_subsystem_remove_host_done(ctx, 0);
+	}
 	if (rc != 0) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
 		free_rpc_nvmf_subsystem_remove_host(ctx);
