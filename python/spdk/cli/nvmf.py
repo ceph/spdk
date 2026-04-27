@@ -415,12 +415,15 @@ def add_parser(subparsers):
         args.client.nvmf_subsystem_remove_host(
                                             nqn=args.nqn,
                                             host=args.host,
+                                            keep_connections=args.keep_connections,
                                             tgt_name=args.tgt_name)
 
     p = subparsers.add_parser('nvmf_subsystem_remove_host', help='Remove a host from an NVMe-oF subsystem')
     p.add_argument('nqn', help='NVMe-oF subsystem NQN')
     p.add_argument('host', help='Host NQN to remove')
     p.add_argument('-t', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
+    p.add_argument('--keep-connections', action='store_true',
+                   help='Do not disconnect existing connections from this host (optional)')
     p.set_defaults(func=nvmf_subsystem_remove_host)
 
     def nvmf_subsystem_set_keys(args):
