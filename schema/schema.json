@@ -4519,6 +4519,11 @@
           "description": "Host NQN to remove from the list of allowed host NQNs"
         },
         {
+          "name": "keep_connections",
+          "type": "boolean",
+          "description": "If true, will not disconnect existing connections from this host (default: false)"
+        },
+        {
           "name": "tgt_name",
           "type": "string",
           "description": "Parent NVMe-oF target name."
