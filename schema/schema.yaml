@@ -3991,6 +3991,9 @@ methods:
       - name: timeout_ms
         type: uint64
         description: Timeout in ms to wait for I/Os to complete (optional). Default value is derived from the controller CAP.TO.
+      - name: keep_connections
+        type: boolean
+        description: Do not disconnect existing connections from this host
   - name: nvmf_subsystem_allow_any_host
     description: Configure a subsystem to allow any host to connect or to enforce the host NQN list.
     result:
