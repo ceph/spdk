@@ -308,8 +308,10 @@ struct spdk_bdev_ext_io_opts {
 	union spdk_bdev_nvme_cdw12 nvme_cdw12;
 	/** defined by \ref spdk_bdev_nvme_cdw13 */
 	union spdk_bdev_nvme_cdw13 nvme_cdw13;
+	/** Size of the metadata buffer, optional */
+	uint32_t md_len;
 } __attribute__((packed));
-SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_ext_io_opts) == 52, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_ext_io_opts) == 56, "Incorrect size");
 
 /**
  * Get the options for the bdev module.
@@ -2207,6 +2209,36 @@ int spdk_bdev_nvme_iov_passthru_md(struct spdk_bdev_desc *desc,
 				   struct iovec *iov, int iovcnt,
 				   size_t nbytes, void *md_buf, size_t md_len,
 				   spdk_bdev_io_completion_cb cb, void *cb_arg);
+
+/**
+ * Submit an NVMe I/O command to the bdev. This passes directly through
+ * the block layer to the device. Support for NVMe passthru is optional,
+ * indicated by calling spdk_bdev_io_type_supported(SPDK_BDEV_IO_TYPE_NVME_IOV_MD).
+ *
+ * \ingroup bdev_io_submit_functions
+ *
+ * The namespace id (nsid) will be populated automatically.
+ *
+ * \param desc Block device descriptor
+ * \param ch I/O channel. Obtained by calling spdk_bdev_get_io_channel().
+ * \param cmd The raw NVMe command. Must be in the NVM command set.
+ * \param iov A scatter gather list of buffers for the command to use.
+ * \param iovcnt The number of elements in iov.
+ * \param nbytes The number of bytes to transfer. The total size of the buffers in iov must be greater than or equal to this size.
+ * \param cb Called when the request is complete.
+ * \param cb_arg Argument passed to cb.
+ * \param ext_opts Optional structure with extended IO request options. `size` member of this structure
+ *             is used for ABI compatibility and must be set to sizeof(struct spdk_bdev_ext_io_opts).
+ *	       The following fields are supported: memory_domain, memory_domain_ctx, accel_sequence, metadata and md_len
+ * \return 0 on success. On success, the callback will always
+ */
+int
+spdk_bdev_nvme_iov_passthru_ext(struct spdk_bdev_desc *desc,
+				struct spdk_io_channel *ch,
+				const struct spdk_nvme_cmd *cmd,
+				struct iovec *iov, int iovcnt, size_t nbytes,
+				spdk_bdev_io_completion_cb cb, void *cb_arg,
+				struct spdk_bdev_ext_io_opts *ext_opts);
 
 /**
  * Submit a copy request to the block device.

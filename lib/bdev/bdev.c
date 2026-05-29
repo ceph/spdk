@@ -7385,12 +7385,15 @@ bdev_nvme_passthru_check_io_type(struct spdk_bdev *bdev, enum spdk_bdev_io_type 
 }
 
 static inline int
-bdev_nvme_passthru_init(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			const struct spdk_nvme_cmd *cmd, void *buf, size_t nbytes,
-			enum spdk_bdev_io_type io_type,
-			struct iovec *iovs, int iovcnt,
-			void *md_buf, size_t md_len,
-			spdk_bdev_io_completion_cb cb, void *cb_arg)
+bdev_nvme_passthru_init_ext(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			    const struct spdk_nvme_cmd *cmd, void *buf, size_t nbytes,
+			    enum spdk_bdev_io_type io_type,
+			    struct iovec *iovs, int iovcnt,
+			    void *md_buf, size_t md_len,
+			    struct spdk_memory_domain *memory_domain,
+			    void *memory_domain_ctx,
+			    struct spdk_accel_sequence *accel_sequence,
+			    spdk_bdev_io_completion_cb cb, void *cb_arg)
 {
 	struct spdk_bdev *bdev = spdk_bdev_desc_get_bdev(desc);
 	struct spdk_bdev_io *bdev_io;
@@ -7404,6 +7407,16 @@ bdev_nvme_passthru_init(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	rc = bdev_nvme_passthru_check_io_type(bdev, io_type, md_buf);
 	if (spdk_unlikely(rc != 0)) {
 		return rc;
+	}
+
+	if (accel_sequence != NULL && !(bdev->accel_sequence_supported & (1u << io_type))) {
+		SPDK_ERRLOG("Acceleration sequence is not supported by the bdev module %s\n", bdev->name);
+		return -ENOTSUP;
+	}
+
+	if (memory_domain != NULL && !bdev->memory_domains_supported) {
+		SPDK_ERRLOG("Memory domain is not supported by the bdev module %s\n", bdev->name);
+		return -ENOTSUP;
 	}
 
 	bdev_io = bdev_channel_get_io(channel);
@@ -7421,11 +7434,26 @@ bdev_nvme_passthru_init(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	bdev_io->u.nvme_passthru.nbytes = nbytes;
 	bdev_io->u.nvme_passthru.md_buf = md_buf;
 	bdev_io->u.nvme_passthru.md_len = md_len;
+	bdev_io->u.nvme_passthru.memory_domain = memory_domain;
+	bdev_io->u.nvme_passthru.memory_domain_ctx = memory_domain_ctx;
+	bdev_io->u.nvme_passthru.accel_sequence = accel_sequence;
 
 	bdev_io_init(bdev_io, bdev, cb_arg, cb);
 
 	bdev_io_submit(bdev_io);
 	return 0;
+}
+
+static inline int
+bdev_nvme_passthru_init(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			const struct spdk_nvme_cmd *cmd, void *buf, size_t nbytes,
+			enum spdk_bdev_io_type io_type,
+			struct iovec *iovs, int iovcnt,
+			void *md_buf, size_t md_len,
+			spdk_bdev_io_completion_cb cb, void *cb_arg)
+{
+	return bdev_nvme_passthru_init_ext(desc, ch, cmd, buf, nbytes, io_type, iovs, iovcnt, md_buf,
+					   md_len, NULL, NULL, NULL, cb, cb_arg);
 }
 
 int
@@ -7465,6 +7493,43 @@ spdk_bdev_nvme_iov_passthru_md(struct spdk_bdev_desc *desc,
 {
 	return bdev_nvme_passthru_init(desc, ch, cmd, NULL, nbytes, SPDK_BDEV_IO_TYPE_NVME_IOV_MD, iov,
 				       iovcnt, md_buf, md_len, cb, cb_arg);
+}
+
+int
+spdk_bdev_nvme_iov_passthru_ext(struct spdk_bdev_desc *desc,
+				struct spdk_io_channel *ch,
+				const struct spdk_nvme_cmd *cmd,
+				struct iovec *iov, int iovcnt, size_t nbytes,
+				spdk_bdev_io_completion_cb cb, void *cb_arg,
+				struct spdk_bdev_ext_io_opts *ext_opts)
+{
+	struct spdk_memory_domain *memory_domain;
+	void *memory_domain_ctx;
+	struct spdk_accel_sequence *accel_sequence;
+	void *md_buf;
+	size_t md_len;
+
+	if (ext_opts) {
+		if (SPDK_GET_FIELD(ext_opts, dif_check_flags_exclude_mask, 0) != 0 ||
+		    SPDK_GET_FIELD(ext_opts, nvme_cdw12.raw, 0) != 0 ||
+		    SPDK_GET_FIELD(ext_opts, nvme_cdw13.raw, 0) != 0) {
+			SPDK_ERRLOG("Only memory domain, its context, accel_sequence, metadata, and md_len are supported\n");
+			return -EINVAL;
+		}
+		memory_domain = SPDK_GET_FIELD(ext_opts, memory_domain, NULL);
+		memory_domain_ctx = SPDK_GET_FIELD(ext_opts, memory_domain_ctx, NULL);
+		accel_sequence = SPDK_GET_FIELD(ext_opts, accel_sequence, NULL);
+		md_buf = SPDK_GET_FIELD(ext_opts, metadata, NULL);
+		md_len = SPDK_GET_FIELD(ext_opts, md_len, 0);
+	} else {
+		memory_domain = NULL;
+		memory_domain_ctx = NULL;
+		accel_sequence = NULL;
+		md_buf = NULL;
+		md_len = 0;
+	}
+	return bdev_nvme_passthru_init_ext(desc, ch, cmd, NULL, nbytes, SPDK_BDEV_IO_TYPE_NVME_IOV_MD, iov,
+					   iovcnt, md_buf, md_len, memory_domain, memory_domain_ctx, accel_sequence, cb, cb_arg);
 }
 
 static void bdev_abort_retry(void *ctx);

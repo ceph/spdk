@@ -967,6 +967,13 @@ struct spdk_bdev_io_nvme_passthru_params {
 
 	/* meta data buffer size to transfer */
 	size_t md_len;
+
+	/** Memory domain and its context to be used by bdev modules */
+	struct spdk_memory_domain *memory_domain;
+	void *memory_domain_ctx;
+
+	/* Sequence of accel operations */
+	struct spdk_accel_sequence *accel_sequence;
 };
 
 struct spdk_bdev_io_zone_mgmt_params {

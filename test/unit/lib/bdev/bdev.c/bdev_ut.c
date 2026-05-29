@@ -1222,6 +1222,7 @@ bdev_io_types_test(void)
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
 	struct spdk_bdev_opts bdev_opts = {};
+	struct spdk_bdev_ext_io_opts ext_opts = {};
 	struct spdk_nvme_cmd cmd = {};
 	struct ut_expected_io *expected_io;
 	struct iovec iov = {};
@@ -1271,6 +1272,32 @@ bdev_io_types_test(void)
 	rc = spdk_bdev_nvme_iov_passthru_md(desc, io_ch, &cmd, &iov, 1, 0, NULL, 0, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(stub_complete_io(1) == 1);
+
+	ext_opts.size = sizeof(ext_opts);
+	ext_opts.metadata = &cmd;
+	ext_opts.md_len = sizeof(cmd);
+	ut_enable_io_type(bdev, SPDK_BDEV_IO_TYPE_NVME_IO_MD, false);
+	rc = spdk_bdev_nvme_iov_passthru_ext(desc, io_ch, &cmd, &iov, 1, 0, io_done, NULL, &ext_opts);
+	CU_ASSERT(rc == -ENOTSUP);
+	ut_enable_io_type(bdev, SPDK_BDEV_IO_TYPE_NVME_IO_MD, true);
+
+	memset(&ext_opts, 0, sizeof(ext_opts));
+	ext_opts.size = sizeof(ext_opts);
+	ext_opts.memory_domain = (struct spdk_memory_domain *)0xdeadbeef;
+	rc = spdk_bdev_nvme_iov_passthru_ext(desc, io_ch, &cmd, &iov, 1, 0, io_done, NULL, &ext_opts);
+	CU_ASSERT(rc == -ENOTSUP);
+
+	memset(&ext_opts, 0, sizeof(ext_opts));
+	ext_opts.size = sizeof(ext_opts);
+	ext_opts.accel_sequence = (struct spdk_accel_sequence *)0xdeadbeef;
+	rc = spdk_bdev_nvme_iov_passthru_ext(desc, io_ch, &cmd, &iov, 1, 0, io_done, NULL, &ext_opts);
+	CU_ASSERT(rc == -ENOTSUP);
+
+	memset(&ext_opts, 0, sizeof(ext_opts));
+	ext_opts.size = sizeof(ext_opts);
+	ext_opts.nvme_cdw12.raw = 1;
+	rc = spdk_bdev_nvme_iov_passthru_ext(desc, io_ch, &cmd, &iov, 1, 0, io_done, NULL, &ext_opts);
+	CU_ASSERT(rc == -EINVAL);
 
 	spdk_put_io_channel(io_ch);
 	spdk_bdev_close(desc);
