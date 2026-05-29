@@ -300,12 +300,25 @@ DEFINE_STUB(spdk_bdev_nvme_iov_passthru_md, int, (
 		    spdk_bdev_io_completion_cb cb, void *cb_arg),
 	    0);
 
-DEFINE_STUB(spdk_bdev_nvme_iov_passthru_ext, int, (
-		    struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-		    const struct spdk_nvme_cmd *cmd, struct iovec *iov, int iovcnt,
-		    size_t nbytes, spdk_bdev_io_completion_cb cb, void *cb_arg,
-		    struct spdk_bdev_ext_io_opts *opts),
-	    0);
+DEFINE_RETURN_MOCK(spdk_bdev_nvme_iov_passthru_ext, int);
+static bool g_bdev_nvme_iov_passthru_ext_called;
+static struct spdk_bdev_ext_io_opts g_bdev_nvme_iov_passthru_ext_opts;
+
+int
+spdk_bdev_nvme_iov_passthru_ext(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+				const struct spdk_nvme_cmd *cmd, struct iovec *iov, int iovcnt,
+				size_t nbytes, spdk_bdev_io_completion_cb cb, void *cb_arg,
+				struct spdk_bdev_ext_io_opts *opts)
+{
+	g_bdev_nvme_iov_passthru_ext_called = true;
+	if (opts) {
+		g_bdev_nvme_iov_passthru_ext_opts = *opts;
+	} else {
+		memset(&g_bdev_nvme_iov_passthru_ext_opts, 0, sizeof(g_bdev_nvme_iov_passthru_ext_opts));
+	}
+
+	return MOCK_GET(spdk_bdev_nvme_iov_passthru_ext);
+}
 
 DEFINE_STUB_V(spdk_bdev_free_io, (struct spdk_bdev_io *bdev_io));
 
@@ -1025,6 +1038,9 @@ test_nvmf_bdev_ctrlr_nvme_passthru(void)
 	req.qpair = &qpair;
 	req.cmd = (union nvmf_h2c_msg *)&cmd;
 	req.rsp = &rsp;
+	req.memory_domain = (struct spdk_memory_domain *)0xdeadbeef;
+	req.memory_domain_ctx = (void *)0xfeedface;
+	req.accel_sequence = (struct spdk_accel_sequence *)0xfacefeed;
 	SPDK_IOV_ONE(req.iov, &req.iovcnt, NULL, 0);
 
 	cmd.nsid = 1;
@@ -1035,8 +1051,15 @@ test_nvmf_bdev_ctrlr_nvme_passthru(void)
 
 	/* NVME_IO success */
 	memset(&rsp, 0, sizeof(rsp));
+	g_bdev_nvme_iov_passthru_ext_called = false;
+	memset(&g_bdev_nvme_iov_passthru_ext_opts, 0, sizeof(g_bdev_nvme_iov_passthru_ext_opts));
 	rc = nvmf_bdev_ctrlr_nvme_passthru_io(&bdev, desc, &ch, &req);
 	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS);
+	CU_ASSERT(g_bdev_nvme_iov_passthru_ext_called == true);
+	CU_ASSERT(g_bdev_nvme_iov_passthru_ext_opts.size == sizeof(g_bdev_nvme_iov_passthru_ext_opts));
+	CU_ASSERT(g_bdev_nvme_iov_passthru_ext_opts.memory_domain == req.memory_domain);
+	CU_ASSERT(g_bdev_nvme_iov_passthru_ext_opts.memory_domain_ctx == req.memory_domain_ctx);
+	CU_ASSERT(g_bdev_nvme_iov_passthru_ext_opts.accel_sequence == req.accel_sequence);
 	nvmf_bdev_ctrlr_complete_cmd(&bdev_io, true, &req);
 	CU_ASSERT(rsp.nvme_cpl.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.nvme_cpl.status.sc == SPDK_NVME_SC_SUCCESS);
@@ -1053,7 +1076,7 @@ test_nvmf_bdev_ctrlr_nvme_passthru(void)
 
 	/* NVME_IO not supported */
 	memset(&rsp, 0, sizeof(rsp));
-	MOCK_SET(spdk_bdev_nvme_iov_passthru_md, -ENOTSUP);
+	MOCK_SET(spdk_bdev_nvme_iov_passthru_ext, -ENOTSUP);
 	rc = nvmf_bdev_ctrlr_nvme_passthru_io(&bdev, desc, &ch, &req);
 	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.nvme_cpl.status.sct == SPDK_NVME_SCT_GENERIC);
@@ -1062,12 +1085,12 @@ test_nvmf_bdev_ctrlr_nvme_passthru(void)
 
 	/* NVME_IO no channel - queue IO */
 	memset(&rsp, 0, sizeof(rsp));
-	MOCK_SET(spdk_bdev_nvme_iov_passthru_md, -ENOMEM);
+	MOCK_SET(spdk_bdev_nvme_iov_passthru_ext, -ENOMEM);
 	rc = nvmf_bdev_ctrlr_nvme_passthru_io(&bdev, desc, &ch, &req);
 	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS);
 	CU_ASSERT(group.stat.pending_bdev_io == 1);
 
-	MOCK_SET(spdk_bdev_nvme_iov_passthru_md, 0);
+	MOCK_SET(spdk_bdev_nvme_iov_passthru_ext, 0);
 
 	/* NVME_ADMIN success */
 	memset(&rsp, 0, sizeof(rsp));

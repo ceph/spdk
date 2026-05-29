@@ -916,10 +916,16 @@ int
 nvmf_bdev_ctrlr_nvme_passthru_io(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 				 struct spdk_io_channel *ch, struct spdk_nvmf_request *req)
 {
+	struct spdk_bdev_ext_io_opts opts = {
+		.size = sizeof(opts),
+		.memory_domain = req->memory_domain,
+		.memory_domain_ctx = req->memory_domain_ctx,
+		.accel_sequence = req->accel_sequence,
+	};
 	int rc;
 
-	rc = spdk_bdev_nvme_iov_passthru_md(desc, ch, &req->cmd->nvme_cmd, req->iov, req->iovcnt,
-					    req->length, NULL, 0, nvmf_bdev_ctrlr_complete_cmd, req);
+	rc = spdk_bdev_nvme_iov_passthru_ext(desc, ch, &req->cmd->nvme_cmd, req->iov, req->iovcnt,
+					     req->length, nvmf_bdev_ctrlr_complete_cmd, req, &opts);
 
 	if (spdk_unlikely(rc)) {
 		if (rc == -ENOMEM) {
