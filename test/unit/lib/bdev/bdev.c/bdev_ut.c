@@ -1222,6 +1222,9 @@ bdev_io_types_test(void)
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
 	struct spdk_bdev_opts bdev_opts = {};
+	struct spdk_nvme_cmd cmd = {};
+	struct ut_expected_io *expected_io;
+	struct iovec iov = {};
 	int rc;
 
 	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
@@ -1260,6 +1263,14 @@ bdev_io_types_test(void)
 	ut_enable_io_type(bdev, SPDK_BDEV_IO_TYPE_NVME_IO, true);
 	ut_enable_io_type(bdev, SPDK_BDEV_IO_TYPE_NVME_IO_MD, true);
 	ut_enable_io_type(bdev, SPDK_BDEV_IO_TYPE_NVME_ADMIN, true);
+
+	/* NVME_IOV_MD uses the NVME_IO/NVME_IO_MD support bits. */
+	ut_enable_io_type(bdev, SPDK_BDEV_IO_TYPE_NVME_IOV_MD, false);
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_NVME_IOV_MD, 0, 0, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	rc = spdk_bdev_nvme_iov_passthru_md(desc, io_ch, &cmd, &iov, 1, 0, NULL, 0, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(stub_complete_io(1) == 1);
 
 	spdk_put_io_channel(io_ch);
 	spdk_bdev_close(desc);
