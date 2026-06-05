@@ -13,6 +13,16 @@ object-data values plus an omap index) were rejected for the first cut: omap fun
 every key through a single object (hotspot, size limits, large values hurt), and the
 hybrid adds a dual-write consistency burden.
 
+## Value size limit
+
+The librados backend caps the KV **value** size at **64 MB**, matching the rados
+object-size limit (a value is one rados object's data; `osd_max_object_size` defaults
+to 128 MiB, and 64 MB is the conservative project cap). This maximum is advertised to
+the initiator as the per-namespace max value length (`kvvml` in the KV Identify
+namespace data). **No `libradosstriper`** — a value is never split across multiple
+rados objects, so a Store exceeding the cap is rejected rather than striped. (Keys are
+unaffected: NVMe KV keys are ≤16 bytes by spec.)
+
 ## Consequences
 
 - The **List** command is **deferred** for the librados backend. rados object
