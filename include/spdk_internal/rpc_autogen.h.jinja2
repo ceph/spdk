@@ -13,6 +13,8 @@
 	{%- set optional = 'false' if field_obj.required else 'true' -%}
 	{%- if field_obj.deprecated -%}
 	{%- set decode_fn = 'rpc_decode_' ~ field_obj.name -%}
+	{%- elif field_obj.type == "object" and field_obj.class is not defined -%}
+	{%- set decode_fn = 'rpc_decode_string_map' -%}
 	{%- elif field_obj.type in ("enum", "object", "array", "bitmask") -%}
 	{%- set decode_fn = 'rpc_decode_' ~ field_obj.class -%}
 	{%- elif field_obj.type == 'boolean' -%}
@@ -44,6 +46,68 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * Generic decoder/free for a free-form JSON object modeled as a key/value map
+ * (schema type "object" with no "class"). The map is stored as a NULL-terminated
+ * char* array: key0, val0, key1, val1, ..., NULL — matching the librados
+ * config_param wire format the consuming modules expect.
+ */
+static inline int
+rpc_decode_string_map(const struct spdk_json_val *val, void *out)
+{
+	char ***map = out;
+	char **entry;
+	uint32_t i;
+
+	if (val->type == SPDK_JSON_VAL_NULL) {
+		*map = calloc(1, sizeof(**map));
+		return *map ? 0 : -1;
+	}
+	if (val->type != SPDK_JSON_VAL_OBJECT_BEGIN) {
+		return -1;
+	}
+
+	*map = calloc((size_t)val->len + 1, sizeof(**map));
+	if (*map == NULL) {
+		return -1;
+	}
+
+	for (i = 0, entry = *map; i < val->len;) {
+		const struct spdk_json_val *name = &val[i + 1];
+		const struct spdk_json_val *value = &val[i + 2];
+
+		if (!(entry[0] = spdk_json_strdup(name)) ||
+		    !(entry[1] = spdk_json_strdup(value))) {
+			goto err;
+		}
+		i += 1 + spdk_json_val_len(value);
+		entry += 2;
+	}
+	return 0;
+
+err:
+	for (entry = *map; *entry; entry++) {
+		free(*entry);
+	}
+	free(*map);
+	*map = NULL;
+	return -1;
+}
+
+static inline void
+rpc_free_string_map(char **map)
+{
+	char **entry;
+
+	if (map == NULL) {
+		return;
+	}
+	for (entry = map; *entry; entry++) {
+		free(*entry);
+	}
+	free(map);
+}
 
 /*
  * Forward-declare every generated struct up front.
@@ -248,7 +312,9 @@ rpc_decode_{{ param.name }}(const struct spdk_json_val *val, void *out)
 {%- if method.params %}
 struct rpc_{{ method.name }}_ctx {
     {%- for param in method.params %}
-	{% if param.type == "object" -%}
+	{% if param.type == "object" and param.class is not defined -%}
+		char **{{ param.name }};	/* free-form key/value map */
+	{%- elif param.type == "object" -%}
 		struct rpc_{{ param.class }} {{ param.name }};
 	{%- elif param.type == "enum" -%}
 		enum rpc_{{ param.class }} {{ param.name }};
@@ -269,7 +335,10 @@ free_rpc_{{ method.name }}(struct rpc_{{ method.name }}_ctx *req)
 {%- for param in method.params if param.type == "string" %}
 	free(req->{{ param.name }});
 {%- endfor %}
-{%- for param in method.params if param.type in ("object", "array") %}
+{%- for param in method.params if param.type == "object" and param.class is not defined %}
+	rpc_free_string_map(req->{{ param.name }});
+{%- endfor %}
+{%- for param in method.params if param.type in ("object", "array") and param.class is defined %}
 	free_rpc_{{ param.class }}(&req->{{ param.name }});
 {%- endfor %}
 }

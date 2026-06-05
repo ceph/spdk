@@ -170,7 +170,11 @@ def lint_c_code(schema: Dict[str, Any]) -> None:
             if parameter.get('required', False) != (not optional[0]):
                 raise ValueError(f"For method {method['name']}: parameter '{parameter['name']}': 'required' field is mismatched")
             has_class = 'class' in parameter
-            needs_class = parameter['type'] in schema_by_type
+            # An 'object' with no 'class' is a free-form key/value map (e.g.
+            # librados config_param): there is no fixed-field schema object to
+            # reference, so it neither has nor needs a class.
+            free_form_object = parameter['type'] == 'object' and not has_class
+            needs_class = parameter['type'] in schema_by_type and not free_form_object
             msg = f"Invalid 'class' '{parameter.get('class')}' for '{parameter['type']}' on '{parameter['name']}' in '{method['name']}' rpc"
             if has_class != needs_class:
                 raise ValueError(msg)
@@ -192,7 +196,7 @@ def lint_c_code(schema: Dict[str, Any]) -> None:
 
 def lint_py_cli(schema: Dict[str, Any]) -> None:
     types = {'string' : str, 'uint8': int, 'uint16': int, 'int32': int, 'uint32': int, 'uint64': int, 'boolean':bool,
-             'uuid' : str, 'enum': str, 'array': str.split, 'bitmask': str.split}
+             'uuid' : str, 'enum': str, 'array': str.split, 'bitmask': str.split, 'object': str}
     exceptions = {'load_config', 'load_subsystem_config', 'save_config', 'save_subsystem_config'}
     _, subparsers = rpc.create_parser()
     schema_methods = set(method["name"] for method in schema['methods'])
@@ -224,8 +228,12 @@ def lint_py_cli(schema: Dict[str, Any]) -> None:
         # Those are not part of the schema, just part of the python cli
         p_schema_exceptions = {'help', 'total_size', 'format_lspci'}
         p_cli_exceptions = {'num_blocks'}
+        # A fixed-shape 'object' (with a 'class') expands into its schema
+        # object's named fields, each a distinct CLI arg. A class-less 'object'
+        # is a free-form key/value map exposed as a single CLI arg, so keep it.
         p_params = [schema_objects[parameter['class']]['fields']
-                    if parameter.get('type') == 'object' else [parameter]
+                    if parameter.get('type') == 'object' and 'class' in parameter
+                    else [parameter]
                     for parameter in method['params']]
         p_params_set = set([p['name'] for sub in p_params for p in sub])
         p_missing_in_cli = p_params_set - set(actions) - p_cli_exceptions
