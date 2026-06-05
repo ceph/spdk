@@ -111,6 +111,13 @@ enum spdk_kvdev_store_flags {
 	 * exist; otherwise fail with SPDK_KVDEV_IO_STATUS_KEY_EXIST.
 	 */
 	SPDK_KVDEV_STORE_FLAG_SINKE	= 1u << 1,
+	/**
+	 * TTL valid (vendor extension, ADR-0003). When set, opts->ttl carries a
+	 * time-to-live in seconds that the backend persists alongside the value.
+	 * Store-only: the TTL is recorded but never enforced (no lazy expiry, no
+	 * reaper). When clear, opts->ttl is ignored.
+	 */
+	SPDK_KVDEV_STORE_F_TTL		= 1u << 2,
 };
 
 /**
@@ -118,9 +125,9 @@ enum spdk_kvdev_store_flags {
  *
  * The struct is versioned by its leading \c size field: callers set \c size to
  * sizeof(struct spdk_kvdev_store_opts) and backends must only read fields that
- * fall within the supplied size. This lets later slices append members (e.g. a
- * TTL for slice 5) without breaking the store ABI. Always populate via
- * spdk_kvdev_store_opts_init() before setting fields.
+ * fall within the supplied size. This lets later slices append members without
+ * breaking the store ABI. Always populate via spdk_kvdev_store_opts_init()
+ * before setting fields.
  */
 struct spdk_kvdev_store_opts {
 	/** Size of this structure as known to the caller. Must be set first. */
@@ -129,14 +136,13 @@ struct spdk_kvdev_store_opts {
 	uint32_t	flags;
 
 	/*
-	 * Future slices APPEND fields below this line (never reorder/remove
-	 * existing ones); the \c size field handles versioning. The slot
-	 * reserved next is a CDW12 TTL for slice 5:
-	 *   uint32_t ttl;
-	 * For now an explicit reserved word keeps the struct's footprint stable
-	 * so adding the TTL later is a pure value change, not an ABI break.
+	 * Time-to-live in seconds (vendor extension, ADR-0003). Honoured only
+	 * when SPDK_KVDEV_STORE_F_TTL is set in \c flags; otherwise ignored.
+	 * Store-only: the backend persists this as a deadline but does not
+	 * enforce expiry. Future slices APPEND fields below this line (never
+	 * reorder/remove existing ones); the \c size field handles versioning.
 	 */
-	uint32_t	reserved;
+	uint32_t	ttl;
 };
 SPDK_STATIC_ASSERT(sizeof(struct spdk_kvdev_store_opts) == 16, "Incorrect size");
 

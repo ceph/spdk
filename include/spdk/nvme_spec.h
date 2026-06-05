@@ -1459,6 +1459,16 @@ union spdk_nvme_cmd_cdw12 {
 
 	union spdk_nvme_feat_fdp_cdw12 feat_fdp_cdw12;
 	union spdk_nvme_feat_fdp_events_cdw12 feat_fdp_events_cdw12;
+
+	struct {
+		/*
+		 * Vendor extension (ADR-0003): Time To Live in seconds for a KV
+		 * Store. CDW12 is unused by the ratified KV Store command, so we
+		 * repurpose it. Honoured only when the TTL Valid Store Option bit
+		 * (SPDK_NVME_KV_STORE_OPT_TTL_VALID) is set in CDW11.
+		 */
+		uint32_t ttl       : 32;
+	} kv_store;
 };
 SPDK_STATIC_ASSERT(sizeof(union spdk_nvme_cmd_cdw12) == 4, "Incorrect size");
 
@@ -1881,6 +1891,14 @@ enum spdk_nvme_kv_store_option {
 	SPDK_NVME_KV_STORE_OPT_DONT_STORE_IF_KEY_NOT_EXISTS	= 1 << 0,
 	SPDK_NVME_KV_STORE_OPT_DONT_STORE_IF_KEY_EXISTS		= 1 << 1,
 	SPDK_NVME_KV_STORE_OPT_DONT_COMPRESS			= 1 << 2,
+	/*
+	 * Vendor extension (ADR-0003): TTL Valid. The Store Option field occupies
+	 * CDW11 bits 15:8; the ratified spec leaves bits 15:11 (Store Option bits
+	 * 7:3) reserved. We claim bit 3 (== CDW11 bit 11) to signal that CDW12
+	 * carries a TTL in seconds. When clear, CDW12 is ignored (backward
+	 * compatible with hosts unaware of the extension).
+	 */
+	SPDK_NVME_KV_STORE_OPT_TTL_VALID			= 1 << 3,
 };
 
 /**
@@ -3660,9 +3678,25 @@ struct spdk_nvme_kv_ns_data {
 
 	uint8_t				reserved328[3512];
 
-	uint8_t				vendor_specific[256];
+	/*
+	 * Vendor extension (ADR-0003): the first byte of the vendor-specific
+	 * region advertises vendor KV capabilities so a host can detect optional
+	 * features. SPDK_NVME_KV_NS_VS_CAP_TTL (bit 0) means KV Store honours the
+	 * TTL Valid Store Option + CDW12 TTL.
+	 */
+	uint8_t				vs_cap;
+	uint8_t				vendor_specific[255];
 };
 SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_kv_ns_data) == 4096, "Incorrect size");
+
+/**
+ * Vendor KV namespace capability bits, advertised in
+ * spdk_nvme_kv_ns_data.vs_cap (ADR-0003).
+ */
+enum spdk_nvme_kv_ns_vs_cap {
+	/** KV Store supports the vendor TTL extension (store-only, not enforced). */
+	SPDK_NVME_KV_NS_VS_CAP_TTL	= 1 << 0,
+};
 
 /** Identify – I/O Command Set Independent Identify Namespace Data Structure (CNS 08h) */
 struct spdk_nvme_ns_iocs_independent_data {

@@ -75,6 +75,11 @@ nvmf_kvdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_kv_ns_dat
 	 * a kvdev exposes it. */
 	nsdata->nsze = caps->max_value_len;
 	nsdata->nuse = 0;
+
+	/* Advertise the vendor TTL extension (ADR-0003) so a host can detect
+	 * that KV Store honours the TTL Valid Store Option + CDW12 TTL. The TTL
+	 * is store-only (persisted, never enforced). */
+	nsdata->vs_cap |= SPDK_NVME_KV_NS_VS_CAP_TTL;
 }
 
 void
@@ -321,6 +326,13 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		}
 		if (cmd->cdw11_bits.kv.ro & SPDK_NVME_KV_STORE_OPT_DONT_STORE_IF_KEY_EXISTS) {
 			opts.flags |= SPDK_KVDEV_STORE_FLAG_SINKE;
+		}
+		/* Vendor TTL extension (ADR-0003): when the TTL Valid Store Option
+		 * bit is set, CDW12 carries a TTL in seconds. Pass it through to
+		 * the backend, which persists but does not enforce it. */
+		if (cmd->cdw11_bits.kv.ro & SPDK_NVME_KV_STORE_OPT_TTL_VALID) {
+			opts.flags |= SPDK_KVDEV_STORE_F_TTL;
+			opts.ttl = cmd->cdw12_bits.kv_store.ttl;
 		}
 
 		data = nvmf_kvdev_get_contig_buf(req, true, kv_req);

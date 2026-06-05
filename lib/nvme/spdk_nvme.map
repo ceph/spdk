@@ -275,6 +275,7 @@
 	spdk_nvme_kv_ns_get_data;
 	spdk_nvme_kv_ctrlr_get_data;
 	spdk_nvme_kv_store;
+	spdk_nvme_kv_store_ext;
 	spdk_nvme_kv_retrieve;
 	spdk_nvme_kv_delete;
 	spdk_nvme_kv_exist;

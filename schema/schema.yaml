@@ -1866,6 +1866,17 @@ methods:
         type: string
         required: true
         description: Name of the in-memory kvdev to delete
+  - name: kvdev_mem_get_entry
+    description: 'Inspect a stored entry (debug; exposes the store-only TTL)'
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the in-memory kvdev
+      - name: key
+        type: string
+        required: true
+        description: Key (1-16 byte ASCII string) of the entry to inspect
   - name: nvmf_subsystem_add_kv_ns
     description: 'Add a Key-Value namespace to an NVMe-oF subsystem'
     result:
