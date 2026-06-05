@@ -66,6 +66,7 @@ DEPDIRS-notify := log util $(JSON_LIBS)
 DEPDIRS-trace := log util $(JSON_LIBS)
 
 DEPDIRS-bdev := accel log util thread $(JSON_LIBS) notify trace dma
+DEPDIRS-kvdev := log util thread $(JSON_LIBS)
 DEPDIRS-event := log util thread $(JSON_LIBS) trace init
 DEPDIRS-init := jsonrpc json log rpc thread util
 DEPDIRS-ftl := log util thread bdev json jsonrpc
@@ -76,7 +77,7 @@ DEPDIRS-nbd := log util thread $(JSON_LIBS) bdev
 ifeq ($(CONFIG_UBLK),y)
 DEPDIRS-ublk := log util thread $(JSON_LIBS) bdev
 endif
-DEPDIRS-nvmf := accel log sock util nvme thread $(JSON_LIBS) trace bdev keyring
+DEPDIRS-nvmf := accel log sock util nvme thread $(JSON_LIBS) trace bdev kvdev keyring
 ifeq ($(CONFIG_RDMA),y)
 DEPDIRS-nvmf += rdma_provider rdma_utils rdma_cm
 endif
@@ -136,6 +137,9 @@ ifeq (y,$(DPDK_POWER))
 DEPDIRS-scheduler_dpdk_governor := event json log util
 DEPDIRS-scheduler_gscheduler := event log util
 endif
+
+# module/kvdev
+DEPDIRS-kvdev_mem := log util $(JSON_LIBS) thread kvdev
 
 # module/bdev
 ifeq ($(OS),Linux)
