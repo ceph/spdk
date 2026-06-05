@@ -225,6 +225,11 @@ spdk_nvme_kv_exec(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
 		return -EINVAL;
 	}
 
+	if (input == NULL && input_len > 0) {
+		/* An input length with no input buffer would stage uninitialized bytes. */
+		return -EINVAL;
+	}
+
 	/*
 	 * KV Exec is bidirectional and uses one data buffer: the input blob is
 	 * gathered host->controller, then the controller scatters the output
