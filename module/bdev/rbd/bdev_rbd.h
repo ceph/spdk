@@ -10,6 +10,7 @@
 
 #include "spdk/bdev.h"
 #include "spdk/rpc.h"
+#include <rados/librados.h>
 
 struct cluster_register_info {
 	char *name;
@@ -20,6 +21,7 @@ struct cluster_register_info {
 	char *core_mask;
 };
 
+int bdev_rbd_get_cluster(const char *cluster_name, rados_t **cluster);
 void dump_cluster_nonce(struct spdk_json_write_ctx *w, const char *name);
 void bdev_rbd_free_config(char **config);
 char **bdev_rbd_dup_config(const char *const *config);

@@ -8,6 +8,9 @@
 #include "spdk/init.h"
 
 #include "kvdev_mem.h"
+#ifdef SPDK_CONFIG_KVDEV_RADOS
+#include "kvdev_rados.h"
+#endif
 
 static void
 kvdev_subsystem_initialize(void)
@@ -39,6 +42,10 @@ kvdev_write_config_json(struct spdk_json_write_ctx *w)
 	 * name, and the nvmf subsystem depends on kvdev so this section is
 	 * emitted/replayed first. */
 	kvdev_mem_write_config_json(w);
+#ifdef SPDK_CONFIG_KVDEV_RADOS
+	/* librados-backed kvdevs (and their cluster registrations). */
+	kvdev_rados_write_config_json(w);
+#endif
 
 	spdk_json_write_array_end(w);
 }

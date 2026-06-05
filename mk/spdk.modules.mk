@@ -78,6 +78,9 @@ endif
 ifeq ($(CONFIG_RBD),y)
 BLOCKDEV_MODULES_LIST += bdev_rbd
 BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd
+# librados-backed kvdev (ADR-0002/0004). Shares the --with-rbd toggle; -lrados
+# is already added above for bdev_rbd, so no extra private lib is needed here.
+KVDEV_MODULES_LIST += kvdev_rados
 endif
 
 ifeq ($(CONFIG_DAOS),y)

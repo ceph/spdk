@@ -429,21 +429,18 @@ bdev_rados_cluster_init(const char *user_id, const char *const *config,
 	return 0;
 }
 
-static int
+int
 bdev_rbd_get_cluster(const char *cluster_name, rados_t **cluster)
 {
 	struct bdev_rbd_cluster *entry;
 
-	if (cluster == NULL) {
-		SPDK_ERRLOG("cluster should not be NULL\n");
-		return -1;
-	}
-
 	pthread_mutex_lock(&g_map_bdev_rbd_cluster_mutex);
 	STAILQ_FOREACH(entry, &g_map_bdev_rbd_cluster, link) {
 		if (strcmp(cluster_name, entry->name) == 0) {
-			entry->ref++;
-			*cluster = &entry->cluster;
+			if (cluster != NULL) {
+				entry->ref++;
+				*cluster = &entry->cluster;
+			}
 			pthread_mutex_unlock(&g_map_bdev_rbd_cluster_mutex);
 			return 0;
 		}
