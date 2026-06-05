@@ -222,9 +222,11 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		struct spdk_kvdev_store_opts opts;
 
 		spdk_kvdev_store_opts_init(&opts, sizeof(opts));
-		/* Store Option bits live in CDW11 Request Options (ro): bit 0 maps to
-		 * Store-If-No-Key-Exists, bit 1 to Store-If-Key-Exists, per the KV
-		 * Command Set spec. (CDW11 bit 8 == ro bit 0, bit 9 == ro bit 1.) */
+		/* Store Option bits live in CDW11 Request Options (ro), per the KV
+		 * Command Set spec (CDW11 bit 8 == ro bit 0, bit 9 == ro bit 1):
+		 *   - "Don't store if key does NOT exist"  => Store-If-Key-Exists (SIKE)
+		 *   - "Don't store if key DOES exist"       => Store-If-No-Key-Exists (SINKE)
+		 */
 		if (cmd->cdw11_bits.kv.ro & SPDK_NVME_KV_STORE_OPT_DONT_STORE_IF_KEY_NOT_EXISTS) {
 			opts.flags |= SPDK_KVDEV_STORE_FLAG_SIKE;
 		}

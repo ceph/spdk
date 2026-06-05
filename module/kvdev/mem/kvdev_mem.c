@@ -9,6 +9,7 @@
 #include "spdk/log.h"
 #include "spdk/tree.h"
 #include "spdk/util.h"
+#include "spdk/json.h"
 
 #include "kvdev_mem.h"
 
@@ -341,6 +342,35 @@ kvdev_mem_delete(const char *name)
 	}
 
 	return spdk_kvdev_unregister(kvdev);
+}
+
+void
+kvdev_mem_write_config_json(struct spdk_json_write_ctx *w)
+{
+	struct kvdev_mem *mdev;
+	const struct spdk_kvdev_caps *caps;
+
+	TAILQ_FOREACH(mdev, &g_kvdev_mem_head, tailq) {
+		caps = &mdev->kvdev.caps;
+
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_string(w, "method", "kvdev_mem_create");
+
+		spdk_json_write_named_object_begin(w, "params");
+		spdk_json_write_named_string(w, "name", mdev->kvdev.name);
+		if (caps->max_value_len != 0) {
+			spdk_json_write_named_uint32(w, "max_value_len", caps->max_value_len);
+		}
+		if (caps->max_num_keys != 0) {
+			spdk_json_write_named_uint32(w, "max_num_keys", caps->max_num_keys);
+		}
+		if (!spdk_uuid_is_null(&mdev->kvdev.uuid)) {
+			spdk_json_write_named_uuid(w, "uuid", &mdev->kvdev.uuid);
+		}
+		spdk_json_write_object_end(w);
+
+		spdk_json_write_object_end(w);
+	}
 }
 
 SPDK_LOG_REGISTER_COMPONENT(kvdev_mem)
