@@ -125,6 +125,39 @@ wait_for_completion(struct kv_ctx *ctx)
 	return ctx->failed ? -1 : 0;
 }
 
+/*
+ * Bounded variant of wait_for_completion used by the rados-exec path (KVX-3).
+ * A KV Exec maps to an OSD-side rados_aio_exec; if the vstart OSD is DOWN or
+ * WEDGED (e.g. crashed by a bad object class), the command never completes and
+ * the plain wait_for_completion() above would spin FOREVER. This version gives
+ * up after timeout_s seconds and reports failure so the e2e fails fast instead
+ * of hanging. Returns 0 on success, -1 on command error, -2 on timeout.
+ */
+static int
+wait_for_completion_timeout(struct kv_ctx *ctx, unsigned timeout_s)
+{
+	uint64_t deadline;
+
+	ctx->done = false;
+	ctx->failed = false;
+	deadline = spdk_get_ticks() + (uint64_t)timeout_s * spdk_get_ticks_hz();
+	while (!ctx->done) {
+		spdk_nvme_qpair_process_completions(ctx->qpair, 0);
+		if (!ctx->done && spdk_get_ticks() >= deadline) {
+			fprintf(stderr,
+				"TIMEOUT: KV Exec did not complete within %us "
+				"(OSD down or wedged?)\n", timeout_s);
+			return -2;
+		}
+	}
+	return ctx->failed ? -1 : 0;
+}
+
+/* Per-KV-Exec completion budget for the rados-exec path. The cls round-trip
+ * through a healthy vstart OSD is sub-second; 20s is generous headroom while
+ * still bounding a dead/wedged-OSD hang to seconds, not forever. */
+#define KV_RADOS_EXEC_TIMEOUT_S 20u
+
 int
 main(int argc, char **argv)
 {
@@ -231,7 +264,10 @@ main(int argc, char **argv)
 		fprintf(stderr, "spdk_nvme_kv_store_ext submit failed: %d\n", rc);
 		goto free_qpair;
 	}
-	if (wait_for_completion(&ctx) != 0) {
+	/* In the rados-exec path this Store also round-trips through the OSD, so
+	 * bound it too: a dead/wedged OSD must fail fast here rather than hang. */
+	if ((exec_rados ? wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S)
+			: wait_for_completion(&ctx)) != 0) {
 		fprintf(stderr, "KV Store failed\n");
 		rc = 1;
 		goto free_qpair;
@@ -264,7 +300,7 @@ main(int argc, char **argv)
 		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
 				       1 /* kvtest:echo */, exec_buf, sizeof(echo_in),
 				       exec_buf, buf_len, io_complete, &ctx);
-		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
 			fprintf(stderr, "KV Exec rados echo failed\n");
 			spdk_dma_free(exec_buf);
 			rc = 1;
@@ -287,7 +323,7 @@ main(int argc, char **argv)
 		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
 				       2 /* kvtest:upcase */, exec_buf, 0,
 				       exec_buf, buf_len, io_complete, &ctx);
-		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
 			fprintf(stderr, "KV Exec rados upcase failed\n");
 			spdk_dma_free(exec_buf);
 			rc = 1;
