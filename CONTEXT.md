@@ -58,3 +58,30 @@ A vendor-specific, non-standard time-to-live attached to a Store. It is *persist
 **not enforced** — an expired [Key] is still retrievable. Always note "store-only" when
 describing current behavior, to distinguish it from a future enforced expiry.
 _Avoid_: expiry, expiration (those imply enforcement we don't yet do).
+
+**KV Exec**:
+A vendor-specific KV command (vendor I/O opcode) that runs an allowlisted [Object class]
+method on the object backing a [Key], returning an output blob. The data-plane mapping
+of RADOS `rados_exec` onto NVMe KV.
+_Avoid_: KV RPC, compute command.
+
+**Object class** (cls):
+A RADOS server-side plugin method executed on the OSD that owns an object, invoked via
+`rados_exec`. KV Exec targets one of these.
+_Avoid_: plugin, coprocessor, UDF.
+
+**Op-ID**:
+The small integer a [KV Exec] command carries to name its operation. The [Control
+sidecar] maps an op-ID to a concrete (object class, method, arg policy); initiator
+strings never name the class/method directly.
+_Avoid_: opcode (that's the NVMe opcode), method id.
+
+**Allowlist**:
+The set of permitted [Op-ID] → (object class, method) bindings the target will execute.
+The trust boundary for [KV Exec]; managed by the [Control sidecar].
+_Avoid_: whitelist, ACL.
+
+**Control sidecar**:
+The external gRPC service that exposes get/set of the [Allowlist] and applies it to the
+SPDK target over SPDK's JSON-RPC. Separate from the data plane.
+_Avoid_: controller (overloaded with NVMe controller), gRPC server (when precision needed).
