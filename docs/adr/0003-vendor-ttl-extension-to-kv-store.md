@@ -39,3 +39,10 @@ separate, later decision.
   target clock and inline-delete path; deferred.
 - **Active reaper** — true space reclamation, but needs the enumeration we deferred for
   rados; rejected for now.
+- **Ceph `snaptrim`** — evaluated and rejected. `snaptrim` is the OSD's snapshot-clone
+  garbage collector: it runs when a snapshot is *deleted* and removes only the clone
+  objects of that snapshot, never live (head) objects, and it has no time/TTL trigger.
+  KV values are live head objects, so `snaptrim` would never reap them. RADOS has no
+  native per-object TTL (RGW lifecycle is the S3 gateway, not our librados-direct path),
+  so any enforcement must be built (lazy-on-access, an omap expiry index + sweeper, or a
+  periodic object scan). Enforcement remains deferred; TTL stays a store-only annotation.
