@@ -1469,6 +1469,16 @@ union spdk_nvme_cmd_cdw12 {
 		 */
 		uint32_t ttl       : 32;
 	} kv_store;
+
+	struct {
+		/*
+		 * Vendor extension (ADR-0005): output buffer size in bytes for a
+		 * KV Exec. The device writes at most this many bytes of output
+		 * back into the host buffer and reports the true output length in
+		 * completion DW0 (Retrieve-style truncation contract).
+		 */
+		uint32_t osize     : 32;
+	} kv_exec;
 };
 SPDK_STATIC_ASSERT(sizeof(union spdk_nvme_cmd_cdw12) == 4, "Incorrect size");
 
@@ -1482,6 +1492,16 @@ union spdk_nvme_cmd_cdw13 {
 		/* Directive Specific */
 		uint32_t dspec     : 16;
 	} write;
+
+	struct {
+		/*
+		 * Vendor extension (ADR-0005): Operation ID for a KV Exec. A small
+		 * integer that names the server-side operation to run (never a
+		 * class/method string on the data path). Built-ins in the in-memory
+		 * kvdev: 1 = echo input->output, 2 = append input to stored value.
+		 */
+		uint32_t op_id     : 32;
+	} kv_exec;
 };
 SPDK_STATIC_ASSERT(sizeof(union spdk_nvme_cmd_cdw13) == 4, "Incorrect size");
 
@@ -1882,6 +1902,24 @@ enum spdk_nvme_kv_opcode {
 	SPDK_NVME_OPC_KV_LIST				= 0x06,
 	SPDK_NVME_OPC_KV_DELETE				= 0x10,
 	SPDK_NVME_OPC_KV_EXIST				= 0x14,
+	/*
+	 * Vendor-specific KV opcode (ADR-0005): KV Exec. The KV command set
+	 * leaves opcodes 0x80-0xFF vendor specific. We pick 0x83 so the low two
+	 * bits (1:0 == 11b) mark the command BIDIRECTIONAL: it transfers an input
+	 * blob host->controller and an output blob controller->host through the
+	 * single data buffer. KV Exec runs an op-ID-selected operation
+	 * server-side. CDW layout (see lib/nvme/nvme_kv.c / lib/nvmf/ctrlr_kvdev.c):
+	 *   - Key:               CDW2/3 (low 8 bytes), CDW14/15 (high 8 bytes)
+	 *   - Key length:        CDW11 bits 7:0 (kv.kl)
+	 *   - Input length:      CDW10 (bytes of input gathered to the device)
+	 *   - Output buffer size:CDW12 (max bytes the device may scatter back)
+	 *   - Operation ID:      CDW13
+	 * The single data buffer holds the input on submit and receives the
+	 * output on completion; the host sizes it to max(input_len, output_size).
+	 * The true output length is returned in completion DW0, with the same
+	 * truncation contract as Retrieve (device fills up to the host buffer).
+	 */
+	SPDK_NVME_OPC_KV_EXEC				= 0x83,
 };
 
 /**

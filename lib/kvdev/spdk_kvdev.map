@@ -19,6 +19,7 @@
 	spdk_kvdev_delete;
 	spdk_kvdev_exist;
 	spdk_kvdev_list;
+	spdk_kvdev_exec;
 
 	local: *;
 };

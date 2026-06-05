@@ -387,6 +387,81 @@ main(int argc, char **argv)
 	}
 
 	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete/List round-trip succeeded\n");
+
+	/*
+	 * Slice KVX-1: vendor KV Exec over the single bidirectional data buffer.
+	 * Op 1 (ECHO) copies the input straight to the output; op 2 (APPEND)
+	 * appends the input to the value stored under the key and returns the new
+	 * full value. g_key currently holds g_value (re-stored before List).
+	 */
+	{
+		const char echo_in[] = "compute-on-storage";
+		const char append_in[] = "+more";
+		char *exec_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+
+		if (exec_buf == NULL) {
+			fprintf(stderr, "Failed to allocate exec DMA buffer\n");
+			rc = 1;
+			goto free_qpair;
+		}
+
+		/* ECHO: input -> output, key need not matter. */
+		memcpy(exec_buf, echo_in, sizeof(echo_in));
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       1 /* ECHO */, exec_buf, sizeof(echo_in),
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Exec ECHO failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (memcmp(exec_buf, echo_in, sizeof(echo_in)) != 0) {
+			fprintf(stderr, "KV Exec ECHO MISMATCH: got '%s'\n", exec_buf);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV Exec ECHO OK: output round-tripped '%s'\n", exec_buf);
+
+		/*
+		 * APPEND "+more" to g_key's value (g_value). Expected output is
+		 * g_value followed by "+more" (both without their NUL terminators
+		 * concatenated; strlen(g_value) + strlen(append_in) bytes).
+		 */
+		memset(exec_buf, 0, buf_len);
+		memcpy(exec_buf, append_in, sizeof(append_in));
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       2 /* APPEND */, exec_buf, strlen(append_in),
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Exec APPEND failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		{
+			/* g_value was stored as sizeof(g_value) bytes (NUL included)
+			 * before List, so the stored value is the string plus its
+			 * terminating NUL; APPEND tacks on strlen(append_in) bytes. The
+			 * new value is therefore g_value (with NUL) followed by the
+			 * appended bytes at offset sizeof(g_value). */
+			uint32_t base = (uint32_t)sizeof(g_value);
+
+			if (memcmp(exec_buf, g_value, strlen(g_value)) != 0 ||
+			    memcmp(exec_buf + base, append_in, strlen(append_in)) != 0) {
+				fprintf(stderr, "KV Exec APPEND MISMATCH\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+		}
+		fprintf(stderr, "KV Exec APPEND OK: new value length reported via cdw0\n");
+
+		spdk_dma_free(exec_buf);
+	}
+
+	fprintf(stderr, "PASS: KV Exec (echo + append) round-trip succeeded\n");
 	rc = 0;
 
 free_qpair:

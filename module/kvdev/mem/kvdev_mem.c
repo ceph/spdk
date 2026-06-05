@@ -18,6 +18,19 @@
 #define KVDEV_MEM_DEFAULT_MAX_VALUE_LEN (1024 * 1024)
 
 /*
+ * Built-in KV Exec operations (vendor extension, ADR-0005). The in-memory
+ * backend selects an operation by this small integer op-ID; there is no
+ * allowlist yet (KVX-2) -- these built-ins are unconditional for now.
+ *   ECHO:   copy the input blob straight to the output (key need not exist).
+ *   APPEND: append the input blob to the value stored under the key and return
+ *           the new full value as output; reports the new value length.
+ */
+enum kvdev_mem_exec_op {
+	KVDEV_MEM_EXEC_OP_ECHO		= 1,
+	KVDEV_MEM_EXEC_OP_APPEND	= 2,
+};
+
+/*
  * A single key->value entry.  The key is a short binary blob (1-16 bytes) and is
  * stored inline; the value is a separately allocated buffer.  Entries live in an
  * RB tree keyed by (key_len, key bytes) so that store/retrieve are O(log n).
@@ -343,6 +356,104 @@ kvdev_mem_list(struct spdk_io_channel *ch, const void *start_key, uint8_t start_
 	return 0;
 }
 
+/*
+ * Emit an exec result with the Retrieve-style truncation contract: copy at most
+ * buf_len bytes of the true output into output_buf, but always report the true
+ * length. status is BUFFER_TOO_SMALL when the output did not fully fit.
+ */
+static void
+kvdev_mem_exec_emit(void *output_buf, uint32_t buf_len, const void *out, uint32_t out_len,
+		    spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	uint32_t copy_len = spdk_min(out_len, buf_len);
+
+	/* The caller may pass the same buffer for input and output (echo over the
+	 * single bidirectional data buffer), so use memmove and skip the copy when
+	 * source and destination already coincide. */
+	if (copy_len > 0 && output_buf != out) {
+		memmove(output_buf, out, copy_len);
+	}
+
+	if (out_len > buf_len) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL, out_len);
+	} else {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_SUCCESS, out_len);
+	}
+}
+
+/*
+ * KV Exec built-in: APPEND. Append the input blob to the value currently stored
+ * under the key (the key must exist) and return the new full value as output.
+ * The stored value grows by input_len; the output length reported is the new
+ * value length even if the host buffer could not hold all of it.
+ */
+static int
+kvdev_mem_exec_append(struct kvdev_mem *mdev, const void *key, uint8_t key_len,
+		      const void *input, uint32_t input_len,
+		      void *output_buf, uint32_t output_buf_len,
+		      spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_mem_entry *entry;
+	uint32_t new_len;
+	void *buf;
+
+	entry = kvdev_mem_find(mdev, key, key_len);
+	if (entry == NULL) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST, 0);
+		return 0;
+	}
+
+	new_len = entry->value_len + input_len;
+	if (new_len > mdev->kvdev.caps.max_value_len) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_INVALID, 0);
+		return 0;
+	}
+
+	buf = malloc(new_len ? new_len : 1);
+	if (buf == NULL) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_NOMEM, 0);
+		return 0;
+	}
+
+	if (entry->value_len > 0) {
+		memcpy(buf, entry->value, entry->value_len);
+	}
+	if (input_len > 0) {
+		memcpy((uint8_t *)buf + entry->value_len, input, input_len);
+	}
+
+	free(entry->value);
+	entry->value = buf;
+	entry->value_len = new_len;
+
+	kvdev_mem_exec_emit(output_buf, output_buf_len, buf, new_len, cb_fn, cb_arg);
+	return 0;
+}
+
+static int
+kvdev_mem_exec(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
+	       uint32_t op_id, const void *input, uint32_t input_len,
+	       void *output_buf, uint32_t output_buf_len,
+	       spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_mem_io_channel *mch = spdk_io_channel_get_ctx(ch);
+	struct kvdev_mem *mdev = mch->mdev;
+
+	switch (op_id) {
+	case KVDEV_MEM_EXEC_OP_ECHO:
+		/* Echo the input blob straight back as the output. */
+		kvdev_mem_exec_emit(output_buf, output_buf_len, input, input_len, cb_fn, cb_arg);
+		return 0;
+	case KVDEV_MEM_EXEC_OP_APPEND:
+		return kvdev_mem_exec_append(mdev, key, key_len, input, input_len,
+					     output_buf, output_buf_len, cb_fn, cb_arg);
+	default:
+		/* Unknown op-ID: rejected (no allowlist yet, KVX-2). */
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_INVALID, 0);
+		return 0;
+	}
+}
+
 static int
 kvdev_mem_create_channel_cb(void *io_device, void *ctx_buf)
 {
@@ -406,6 +517,7 @@ static const struct spdk_kvdev_fn_table kvdev_mem_fn_table = {
 	.del		= kvdev_mem_op_delete,
 	.exist		= kvdev_mem_exist,
 	.list		= kvdev_mem_list,
+	.exec		= kvdev_mem_exec,
 };
 
 int

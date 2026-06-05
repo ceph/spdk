@@ -4771,6 +4771,17 @@ get_nvmf_io_req_length(struct spdk_nvmf_request *req)
 				return -EINVAL;
 			}
 			return kv_len;
+		case SPDK_NVME_OPC_KV_EXEC:
+			/* Vendor KV Exec (ADR-0005) is bidirectional over a single data
+			 * buffer: it gathers CDW10 (input length) bytes in and scatters up
+			 * to CDW12 (output buffer size) bytes back. Size the data buffer to
+			 * hold the larger of the two. */
+			kv_len = spdk_max(cmd->cdw10_bits.kv.vsize, cmd->cdw12_bits.kv_exec.osize);
+			if (kv_len > INT_MAX) {
+				SPDK_ERRLOG("KV Exec transfer length %u exceeds INT_MAX\n", kv_len);
+				return -EINVAL;
+			}
+			return kv_len;
 		case SPDK_NVME_OPC_KV_DELETE:
 		case SPDK_NVME_OPC_KV_EXIST:
 		default:
