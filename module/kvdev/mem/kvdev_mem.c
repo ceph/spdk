@@ -212,6 +212,47 @@ kvdev_mem_retrieve(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 }
 
 static int
+kvdev_mem_op_delete(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
+		    spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_mem_io_channel *mch = spdk_io_channel_get_ctx(ch);
+	struct kvdev_mem *mdev = mch->mdev;
+	struct kvdev_mem_entry *entry;
+
+	entry = kvdev_mem_find(mdev, key, key_len);
+	if (entry == NULL) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST, 0);
+		return 0;
+	}
+
+	RB_REMOVE(kvdev_mem_tree, &mdev->tree, entry);
+	mdev->num_keys--;
+	free(entry->value);
+	free(entry);
+
+	cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_SUCCESS, 0);
+	return 0;
+}
+
+static int
+kvdev_mem_exist(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
+		spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_mem_io_channel *mch = spdk_io_channel_get_ctx(ch);
+	struct kvdev_mem *mdev = mch->mdev;
+	struct kvdev_mem_entry *entry;
+
+	entry = kvdev_mem_find(mdev, key, key_len);
+	if (entry == NULL) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST, 0);
+		return 0;
+	}
+
+	cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_SUCCESS, 0);
+	return 0;
+}
+
+static int
 kvdev_mem_create_channel_cb(void *io_device, void *ctx_buf)
 {
 	struct kvdev_mem_io_channel *mch = ctx_buf;
@@ -271,6 +312,8 @@ static const struct spdk_kvdev_fn_table kvdev_mem_fn_table = {
 	.get_io_channel	= kvdev_mem_get_io_channel,
 	.store		= kvdev_mem_store,
 	.retrieve	= kvdev_mem_retrieve,
+	.del		= kvdev_mem_op_delete,
+	.exist		= kvdev_mem_exist,
 };
 
 int

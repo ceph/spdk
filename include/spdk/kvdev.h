@@ -183,7 +183,27 @@ struct spdk_kvdev_fn_table {
 			void *value_buf, uint32_t buf_len,
 			spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 
-	/* TODO (later slices): delete, exist, list slot in here. */
+	/**
+	 * Delete the key (and its value) from the kvdev.
+	 *
+	 * On completion the status is SPDK_KVDEV_IO_STATUS_SUCCESS if the key was
+	 * present and removed, or SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST if it was
+	 * absent. The value_len argument to the completion is unused.
+	 */
+	int (*del)(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
+		   spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+	/**
+	 * Test whether the key exists in the kvdev.
+	 *
+	 * On completion the status is SPDK_KVDEV_IO_STATUS_SUCCESS if the key is
+	 * present, or SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST if it is absent. The
+	 * value_len argument to the completion is unused.
+	 */
+	int (*exist)(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
+		     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+	/* TODO (later slices): list slots in here. */
 };
 
 /**
@@ -336,6 +356,28 @@ int spdk_kvdev_retrieve(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch
 			const void *key, uint8_t key_len,
 			void *value_buf, uint32_t buf_len,
 			spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Submit a Delete on the descriptor's kvdev. Thin wrapper over the fn_table.
+ *
+ * The completion fires with SPDK_KVDEV_IO_STATUS_SUCCESS if the key existed and
+ * was deleted, or SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST if the key was absent. The
+ * completion's value_len argument is unused.
+ */
+int spdk_kvdev_delete(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		      const void *key, uint8_t key_len,
+		      spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Submit an Exist on the descriptor's kvdev. Thin wrapper over the fn_table.
+ *
+ * The completion fires with SPDK_KVDEV_IO_STATUS_SUCCESS if the key exists, or
+ * SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST if it does not. The completion's value_len
+ * argument is unused.
+ */
+int spdk_kvdev_exist(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		     const void *key, uint8_t key_len,
+		     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 
 #ifdef __cplusplus
 }
