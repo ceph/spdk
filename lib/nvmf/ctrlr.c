@@ -3286,7 +3286,7 @@ _nvmf_ctrlr_get_ns_safe(struct spdk_nvmf_ctrlr *ctrlr,
 	}
 
 	ns = nvmf_ctrlr_get_ns(ctrlr, nsid);
-	if (ns == NULL || ns->bdev == NULL) {
+	if (ns == NULL || (ns->bdev == NULL && ns->kvdev == NULL)) {
 		/*
 		 * Inactive namespaces should return a zero filled data structure.
 		 * The data buffer is already zeroed by nvmf_ctrlr_process_admin_cmd(),
@@ -3313,6 +3313,23 @@ nvmf_ctrlr_identify_ns(struct spdk_nvmf_ctrlr *ctrlr,
 
 	ns = _nvmf_ctrlr_get_ns_safe(ctrlr, nsid, rsp);
 	if (ns == NULL) {
+		return;
+	}
+
+	/* Key-Value namespaces have no NVM-format (block) identity. The host
+	 * uses the KV IOCS-specific Identify Namespace (CNS 05h, CSI=KV) for the
+	 * real KV limits. We still report a non-zero nsze/ncap in the standard
+	 * CNS 00h structure so the host driver considers the namespace active
+	 * (spdk_nvme_ns_is_active() keys off ncap). */
+	if (ns->csi == SPDK_NVME_CSI_KV) {
+		const struct spdk_kvdev_caps *caps = spdk_kvdev_get_caps(ns->kvdev);
+
+		nsdata->nsze = caps->max_value_len;
+		nsdata->ncap = caps->max_value_len;
+		nsdata->nuse = 0;
+		if (subsystem->opts.ana_reporting) {
+			nsdata->anagrpid = ns->anagrpid;
+		}
 		return;
 	}
 
@@ -3395,6 +3412,14 @@ spdk_nvmf_ctrlr_identify_ns_ext(struct spdk_nvmf_request *req)
 	int rc;
 
 	nvmf_ctrlr_identify_ns(ctrlr, cmd, rsp, &nsdata, cmd->nsid);
+
+	/* Key-Value namespaces have no bdev, so the bdev passthrough path below
+	 * does not apply. Copy the computed (KV) namespace data to the host
+	 * buffer and complete. */
+	if (ns != NULL && ns->csi == SPDK_NVME_CSI_KV) {
+		spdk_nvmf_request_copy_from_buf(req, &nsdata, sizeof(nsdata));
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
 
 	rc = spdk_nvmf_request_get_bdev(cmd->nsid, req, &bdev, &desc, &ch);
 	if (rc) {
@@ -3607,28 +3632,15 @@ nvmf_ns_identify_iocs_nvm(struct spdk_nvmf_ns *ns,
 }
 
 static int
-nvmf_ns_identify_iocs_kv_passthru(struct spdk_nvmf_request *req)
+nvmf_ns_identify_iocs_kv(struct spdk_nvmf_ns *ns,
+			 struct spdk_nvme_cpl *rsp,
+			 struct spdk_nvme_kv_ns_data *nsdata_kv)
 {
-	struct spdk_nvme_cmd *cmd = spdk_nvmf_request_get_cmd(req);
-	struct spdk_nvme_cpl *rsp = spdk_nvmf_request_get_response(req);
-	struct spdk_bdev *bdev;
-	struct spdk_bdev_desc *desc;
-	struct spdk_io_channel *ch;
-	int rc;
+	nvmf_kvdev_ctrlr_identify_ns(ns, nsdata_kv);
 
-	rc = spdk_nvmf_request_get_bdev(cmd->nsid, req, &bdev, &desc, &ch);
-	if (rc) {
-		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
-		rsp->status.sc = SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT;
-		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
-	}
-
-	if (!spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_NVME_ADMIN)) {
-		memset(req->iov[0].iov_base, 0, req->length);
-		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
-	}
-
-	return spdk_nvmf_bdev_ctrlr_nvme_passthru_admin(bdev, desc, ch, req, NULL);
+	rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+	rsp->status.sc = SPDK_NVME_SC_SUCCESS;
+	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 }
 
 int
@@ -3652,6 +3664,11 @@ spdk_nvmf_ns_identify_iocs_specific(struct spdk_nvmf_ctrlr *ctrlr,
 	switch (csi) {
 	case SPDK_NVME_CSI_ZNS:
 		return nvmf_ns_identify_iocs_zns(ns, cmd, rsp, nsdata);
+	case SPDK_NVME_CSI_KV:
+		if (ns->csi == SPDK_NVME_CSI_KV) {
+			return nvmf_ns_identify_iocs_kv(ns, rsp, nsdata);
+		}
+		break;
 	case SPDK_NVME_CSI_NVM:
 		return nvmf_ns_identify_iocs_nvm(ns, rsp, nsdata);
 	default:
@@ -3738,7 +3755,13 @@ spdk_nvmf_ctrlr_identify_iocs_specific(struct spdk_nvmf_ctrlr *ctrlr,
 	case SPDK_NVME_CSI_ZNS:
 		return nvmf_ctrlr_identify_iocs_zns(ctrlr, cmd, rsp, cdata);
 	case SPDK_NVME_CSI_KV:
-		return nvmf_ctrlr_identify_iocs_kv(ctrlr, rsp, cdata);
+		if (nvmf_subsystem_has_kv_iocs(ctrlr->subsys)) {
+			nvmf_kvdev_ctrlr_identify_ctrlr(ctrlr, cdata);
+			rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+			rsp->status.sc = SPDK_NVME_SC_SUCCESS;
+			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+		}
+		break;
 	default:
 		break;
 	}
@@ -3890,7 +3913,7 @@ nvmf_ctrlr_identify_ns_id_descriptor_list(
 	}
 
 	ns = nvmf_ctrlr_get_ns(ctrlr, nsid);
-	if (ns == NULL || ns->bdev == NULL) {
+	if (ns == NULL || (ns->bdev == NULL && ns->kvdev == NULL)) {
 		SPDK_ERRLOG("Identify Namespace Identification Descriptor list with inactive NSID %u\n", nsid);
 		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
 		rsp->status.sc = SPDK_NVME_SC_INVALID_FIELD;
@@ -4018,9 +4041,6 @@ nvmf_ctrlr_identify(struct spdk_nvmf_request *req)
 				tmpbuf, sizeof(tmpbuf));
 		break;
 	case SPDK_NVME_IDENTIFY_NS_IOCS:
-		if (cmd->cdw11_bits.identify.csi == SPDK_NVME_CSI_KV) {
-			return nvmf_ns_identify_iocs_kv_passthru(req);
-		}
 		ret = spdk_nvmf_ns_identify_iocs_specific(ctrlr, cmd, rsp, (void *)&tmpbuf, sizeof(tmpbuf));
 		break;
 	case SPDK_NVME_IDENTIFY_CTRLR_IOCS:
@@ -5357,7 +5377,7 @@ nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 		return nvmf_bdev_ctrlr_io_cancel_cmd(NULL, req);
 	}
 	ns = nvmf_ctrlr_get_ns(ctrlr, nsid);
-	if (spdk_unlikely(ns == NULL || ns->bdev == NULL)) {
+	if (spdk_unlikely(ns == NULL || (ns->bdev == NULL && ns->kvdev == NULL))) {
 		SPDK_DEBUGLOG(nvmf, "Unsuccessful query for nsid %u\n", cmd->nsid);
 		req->error_location = nvmf_error_loc(offsetof(struct spdk_nvme_cmd, nsid), 0);
 		response->status.sc = SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT;
@@ -5378,6 +5398,14 @@ nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 	/* scan-build falsely reporting dereference of null pointer */
 	assert(group != NULL && group->sgroups != NULL);
 	ns_info = &group->sgroups[ctrlr->subsys->id].ns_info[nsid - 1];
+
+	/* Key-Value namespaces are backed by a kvdev, not a bdev, and use a
+	 * dedicated object-shaped dispatch path (see ctrlr_kvdev.c). They do not
+	 * participate in reservations, fused commands, zcopy or passthrough. */
+	if (ns->csi == SPDK_NVME_CSI_KV) {
+		return nvmf_kvdev_ctrlr_process_io_cmd(ns, ns_info->channel, req);
+	}
+
 	if (nvmf_ns_reservation_request_check(ns_info, ctrlr, req)) {
 		SPDK_DEBUGLOG(nvmf, "Reservation Conflict for nsid %u, opcode %u\n",
 			      cmd->nsid, cmd->opc);
