@@ -9,7 +9,14 @@
  * first Key-Value namespace (CSI == SPDK_NVME_CSI_KV), issues a KV Store and
  * then a KV Retrieve for the same key, and verifies the retrieved bytes match.
  *
- * Usage: kv_host <vfio-user-socket-dir>
+ * Usage: kv_host <vfio-user-socket-dir> [exec_mode]
+ *
+ * exec_mode selects how the vendor KV Exec phase (ADR-0005) is checked against
+ * the per-namespace allowlist enforced by the target:
+ *   - "reject" : op-IDs are NOT allowlisted; KV Exec must fail with
+ *                INVALID_OPCODE (01h). This is the default-deny path.
+ *   - "allow"  : op-IDs 1 (echo) and 2 (append) ARE allowlisted; the
+ *                echo+append round-trip must succeed. (default)
  */
 
 #include "spdk/stdinc.h"
@@ -133,11 +140,15 @@ main(int argc, char **argv)
 	uint32_t i;
 	int rc = 1;
 	int sc;
+	bool exec_reject;
 
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <vfio-user-socket-path>\n", argv[0]);
+		fprintf(stderr, "Usage: %s <vfio-user-socket-path> [reject|allow]\n", argv[0]);
 		return 1;
 	}
+	/* KV Exec allowlist phase (ADR-0005): "reject" => expect default-deny,
+	 * anything else (default) => op-IDs are allowlisted and exec must succeed. */
+	exec_reject = (argc > 2 && strcmp(argv[2], "reject") == 0);
 
 	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
@@ -389,10 +400,11 @@ main(int argc, char **argv)
 	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete/List round-trip succeeded\n");
 
 	/*
-	 * Slice KVX-1: vendor KV Exec over the single bidirectional data buffer.
-	 * Op 1 (ECHO) copies the input straight to the output; op 2 (APPEND)
-	 * appends the input to the value stored under the key and returns the new
-	 * full value. g_key currently holds g_value (re-stored before List).
+	 * Slice KVX-1/KVX-2: vendor KV Exec over the single bidirectional data
+	 * buffer, gated by the per-namespace allowlist (ADR-0005). Op 1 (ECHO)
+	 * copies the input straight to the output; op 2 (APPEND) appends the input
+	 * to the value stored under the key and returns the new full value. g_key
+	 * currently holds g_value (re-stored before List).
 	 */
 	{
 		const char echo_in[] = "compute-on-storage";
@@ -402,6 +414,40 @@ main(int argc, char **argv)
 		if (exec_buf == NULL) {
 			fprintf(stderr, "Failed to allocate exec DMA buffer\n");
 			rc = 1;
+			goto free_qpair;
+		}
+
+		/*
+		 * KVX-2 default-deny path: when op-IDs are NOT allowlisted, KV Exec
+		 * must be rejected with INVALID_OPCODE (01h) BEFORE the backend runs.
+		 */
+		if (exec_reject) {
+			ctx.done = false;
+			ctx.failed = false;
+			memcpy(exec_buf, echo_in, sizeof(echo_in));
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       1 /* ECHO */, exec_buf, sizeof(echo_in),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0) {
+				fprintf(stderr, "KV Exec (reject phase) submit failed: %d\n", rc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			while (!ctx.done) {
+				spdk_nvme_qpair_process_completions(ctx.qpair, 0);
+			}
+			if (ctx.last_sct != SPDK_NVME_SCT_GENERIC ||
+			    ctx.last_sc != SPDK_NVME_SC_INVALID_OPCODE) {
+				fprintf(stderr, "KV Exec (reject phase) expected sct=0 sc=0x01, "
+					"got sct=0x%02x sc=0x%02x\n", ctx.last_sct, ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			spdk_dma_free(exec_buf);
+			fprintf(stderr, "PASS: KV Exec op not in allowlist rejected (sc=0x01)\n");
+			rc = 0;
 			goto free_qpair;
 		}
 

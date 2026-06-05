@@ -53,9 +53,19 @@ $rpc_py nvmf_subsystem_add_listener "$nqn" -t VFIOUSER -a "$muser_dir" -s 0
 # host_key / expected_ttl must match kv_host.c (g_key / KV_TEST_TTL_SECONDS).
 host_key="kvkey01"
 expected_ttl=4242
+nsid=1
+
+# ---------------------------------------------------------------------------
+# KVX-2: per-namespace KV Exec allowlist (ADR-0005), default-deny.
+#
+# Phase 1 (reject): with NO allowlist configured, the host's KV Exec (op-ID 1)
+# must be rejected with INVALID_OPCODE. Phase 2 (allow): after
+# nvmf_ns_set_kv_exec_allowlist adds op-IDs 1 and 2, the same echo+append exec
+# must succeed. We also round-trip the allowlist through save_config/load_config.
+# ---------------------------------------------------------------------------
 
 host_log="$sock_dir/kv_host.log"
-"$testdir/kv_host" "$muser_dir" 2>&1 | tee "$host_log"
+"$testdir/kv_host" "$muser_dir" reject 2>&1 | tee "$host_log"
 rc=${PIPESTATUS[0]}
 
 if [[ $rc -eq 0 ]]; then
@@ -67,9 +77,54 @@ if [[ $rc -eq 0 ]]; then
 fi
 
 if [[ $rc -eq 0 ]]; then
-	# Assert the vendor KV Exec (ADR-0005) round-trip (echo + append) succeeded.
-	if ! grep -q "PASS: KV Exec (echo + append) round-trip succeeded" "$host_log"; then
-		echo "kv_vfio_user: FAIL (KV Exec round-trip did not succeed)"
+	# Assert the un-allowlisted KV Exec was rejected with sc=0x01.
+	if ! grep -q "PASS: KV Exec op not in allowlist rejected" "$host_log"; then
+		echo "kv_vfio_user: FAIL (un-allowlisted KV Exec was not rejected)"
+		rc=1
+	fi
+fi
+
+# Allowlist op-IDs 1 (echo) and 2 (append) on the KV namespace, then verify the
+# get RPC reflects it, and that save_config/load_config round-trips it.
+if [[ $rc -eq 0 ]]; then
+	$rpc_py nvmf_ns_set_kv_exec_allowlist "$nqn" "$nsid" "1 2:cls.echo"
+	get_json=$($rpc_py nvmf_ns_get_kv_exec_allowlist "$nqn" "$nsid")
+	echo "nvmf_ns_get_kv_exec_allowlist => $get_json"
+	got_ops=$(echo "$get_json" | python3 -c 'import sys, json; print(",".join(str(e["op_id"]) for e in json.load(sys.stdin)))')
+	if [[ "$got_ops" != "1,2" ]]; then
+		echo "kv_vfio_user: FAIL (get allowlist mismatch: got '$got_ops', expected '1,2')"
+		rc=1
+	fi
+fi
+
+# save_config / load_config round-trip of the allowlist.
+if [[ $rc -eq 0 ]]; then
+	cfg_json=$($rpc_py save_config)
+	if ! echo "$cfg_json" | python3 -c '
+import sys, json
+cfg = json.load(sys.stdin)
+methods = [m for s in cfg["subsystems"] for m in s.get("config", [])
+           if m.get("method") == "nvmf_ns_set_kv_exec_allowlist"]
+assert methods, "no nvmf_ns_set_kv_exec_allowlist in saved config"
+al = methods[0]["params"]["allowlist"]
+ops = sorted(e["op_id"] for e in al)
+assert ops == [1, 2], f"unexpected allowlist in config: {al}"
+bindings = {e["op_id"]: e.get("binding") for e in al}
+assert bindings[2] == "cls.echo", f"binding not round-tripped: {bindings}"
+print("save_config allowlist round-trip OK:", al)
+'; then
+		echo "kv_vfio_user: FAIL (allowlist did not round-trip through save_config)"
+		rc=1
+	fi
+fi
+
+# Phase 2: with op-IDs allowlisted, the echo+append exec must now succeed.
+if [[ $rc -eq 0 ]]; then
+	host_log2="$sock_dir/kv_host_allow.log"
+	"$testdir/kv_host" "$muser_dir" allow 2>&1 | tee "$host_log2"
+	rc=${PIPESTATUS[0]}
+	if [[ $rc -eq 0 ]] && ! grep -q "PASS: KV Exec (echo + append) round-trip succeeded" "$host_log2"; then
+		echo "kv_vfio_user: FAIL (allowlisted KV Exec round-trip did not succeed)"
 		rc=1
 	fi
 fi

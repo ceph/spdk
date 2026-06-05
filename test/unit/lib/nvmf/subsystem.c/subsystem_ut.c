@@ -4359,6 +4359,92 @@ test_nvmf_ns_reservation_add_max_registrants(void)
 	CU_ASSERT_EQUAL(cleared, SPDK_NVMF_MAX_NUM_REGISTRANTS);
 }
 
+/*
+ * KV Exec per-namespace allowlist (ADR-0005): default-deny, set/get round-trip,
+ * binding payload, and the data-path enforcement primitive that ctrlr_kvdev.c
+ * uses (nvmf_ns_kv_exec_op_allowed): an op-ID NOT in the allowlist is rejected;
+ * once allowlisted it is permitted.
+ */
+static void
+test_nvmf_ns_kv_exec_allowlist(void)
+{
+	struct spdk_nvmf_subsystem subsystem = {};
+	struct spdk_nvmf_ns ns = { .nsid = 1, .csi = SPDK_NVME_CSI_KV };
+	struct spdk_nvmf_ns ns_bdev = { .nsid = 2, .csi = SPDK_NVME_CSI_NVM };
+	const struct spdk_nvmf_kv_exec_allow *got = NULL;
+	struct spdk_nvmf_kv_exec_allow set[2];
+	const char *binding = NULL;
+	uint32_t count = 0xffff;
+	int rc;
+
+	subsystem.max_nsid = 2;
+	subsystem.ns = calloc(subsystem.max_nsid, sizeof(subsystem.ns));
+	SPDK_CU_ASSERT_FATAL(subsystem.ns != NULL);
+	subsystem.ns[0] = &ns;
+	subsystem.ns[1] = &ns_bdev;
+
+	/* Default-deny: empty allowlist rejects every op-ID. */
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 1, NULL) == false);
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 2, NULL) == false);
+
+	/* get on an empty allowlist returns count 0. */
+	rc = spdk_nvmf_ns_get_kv_exec_allowlist(&subsystem, 1, &got, &count);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(count == 0);
+
+	/* Setting on a non-KV namespace fails. */
+	set[0].op_id = 1;
+	set[0].binding = NULL;
+	rc = spdk_nvmf_ns_set_kv_exec_allowlist(&subsystem, 2, set, 1);
+	CU_ASSERT(rc == -EINVAL);
+
+	/* Setting on a non-existent nsid fails. */
+	rc = spdk_nvmf_ns_set_kv_exec_allowlist(&subsystem, 99, set, 1);
+	CU_ASSERT(rc == -ENODEV);
+
+	/* Allow op-IDs 1 (no binding) and 2 (with a binding). */
+	set[0].op_id = 1;
+	set[0].binding = NULL;
+	set[1].op_id = 2;
+	set[1].binding = "cls.echo";
+	rc = spdk_nvmf_ns_set_kv_exec_allowlist(&subsystem, 1, set, 2);
+	CU_ASSERT(rc == 0);
+
+	/* Now 1 and 2 are permitted; 3 is still rejected (default-deny). */
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 1, NULL) == true);
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 2, &binding) == true);
+	CU_ASSERT(binding != NULL && strcmp(binding, "cls.echo") == 0);
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 3, NULL) == false);
+
+	/* get reflects the set, including the binding. */
+	rc = spdk_nvmf_ns_get_kv_exec_allowlist(&subsystem, 1, &got, &count);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(count == 2);
+	SPDK_CU_ASSERT_FATAL(got != NULL);
+	CU_ASSERT(got[0].op_id == 1);
+	CU_ASSERT(got[0].binding == NULL);
+	CU_ASSERT(got[1].op_id == 2);
+	CU_ASSERT(got[1].binding != NULL && strcmp(got[1].binding, "cls.echo") == 0);
+
+	/* Replacing with a new set discards the old one. */
+	set[0].op_id = 5;
+	set[0].binding = NULL;
+	rc = spdk_nvmf_ns_set_kv_exec_allowlist(&subsystem, 1, set, 1);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 1, NULL) == false);
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 5, NULL) == true);
+
+	/* Clearing (count 0) returns to default-deny. */
+	rc = spdk_nvmf_ns_set_kv_exec_allowlist(&subsystem, 1, NULL, 0);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(nvmf_ns_kv_exec_op_allowed(&ns, 5, NULL) == false);
+	CU_ASSERT(ns.kv_exec_allowlist == NULL);
+	CU_ASSERT(ns.kv_exec_allowlist_count == 0);
+
+	nvmf_ns_kv_exec_allowlist_free(&ns);
+	free(subsystem.ns);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4408,6 +4494,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvmf_subsystem_disconnect_host_qpair_error);
 	CU_ADD_TEST(suite, test_nvmf_reservation_custom_ops);
 	CU_ADD_TEST(suite, test_nvmf_ns_reservation_add_max_registrants);
+	CU_ADD_TEST(suite, test_nvmf_ns_kv_exec_allowlist);
 
 	allocate_threads(1);
 	set_thread(0);
