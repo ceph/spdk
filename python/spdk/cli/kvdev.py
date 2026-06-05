@@ -28,3 +28,12 @@ def add_parser(subparsers):
     p = subparsers.add_parser('kvdev_mem_delete', help='Delete an in-memory kvdev')
     p.add_argument('name', help='Name of the in-memory kvdev to delete')
     p.set_defaults(func=kvdev_mem_delete)
+
+    def kvdev_mem_get_entry(args):
+        print_json(args.client.kvdev_mem_get_entry(name=args.name, key=args.key))
+
+    p = subparsers.add_parser('kvdev_mem_get_entry',
+                              help='Inspect a stored entry (debug; exposes the store-only TTL)')
+    p.add_argument('name', help='Name of the in-memory kvdev')
+    p.add_argument('key', help='Key (1-16 byte ASCII string) of the entry to inspect')
+    p.set_defaults(func=kvdev_mem_get_entry)

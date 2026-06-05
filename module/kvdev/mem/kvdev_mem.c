@@ -28,6 +28,15 @@ struct kvdev_mem_entry {
 	uint8_t				key_len;
 	uint32_t			value_len;
 	void				*value;
+	/*
+	 * Vendor TTL (ADR-0003), store-only. When ttl_valid is set, ttl is the
+	 * requested time-to-live in seconds and deadline is the absolute unix
+	 * expiry time (store time + ttl). Recorded but never enforced: a
+	 * Retrieve after the deadline still returns the value.
+	 */
+	bool				ttl_valid;
+	uint32_t			ttl;
+	time_t				deadline;
 };
 
 struct kvdev_mem {
@@ -103,6 +112,44 @@ kvdev_mem_store_flags(const struct spdk_kvdev_store_opts *opts)
 	return opts->flags;
 }
 
+/*
+ * Read the vendor TTL (ADR-0003) from an extensible options struct, honouring
+ * its size field. Returns true and fills *ttl when the caller both supplied a
+ * struct large enough to carry ttl and set SPDK_KVDEV_STORE_F_TTL; false
+ * otherwise (no TTL requested / older caller).
+ */
+static bool
+kvdev_mem_store_ttl(const struct spdk_kvdev_store_opts *opts, uint32_t *ttl)
+{
+	if (opts == NULL ||
+	    !(kvdev_mem_store_flags(opts) & SPDK_KVDEV_STORE_F_TTL) ||
+	    opts->size < offsetof(struct spdk_kvdev_store_opts, ttl) + sizeof(opts->ttl)) {
+		return false;
+	}
+	*ttl = opts->ttl;
+	return true;
+}
+
+/*
+ * Record (or clear) the store-only TTL/deadline on an entry. Never enforced.
+ */
+static void
+kvdev_mem_entry_set_ttl(struct kvdev_mem_entry *entry,
+			const struct spdk_kvdev_store_opts *opts)
+{
+	uint32_t ttl;
+
+	if (kvdev_mem_store_ttl(opts, &ttl)) {
+		entry->ttl_valid = true;
+		entry->ttl = ttl;
+		entry->deadline = time(NULL) + (time_t)ttl;
+	} else {
+		entry->ttl_valid = false;
+		entry->ttl = 0;
+		entry->deadline = 0;
+	}
+}
+
 static int
 kvdev_mem_store(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 		const void *value, uint32_t value_len,
@@ -137,6 +184,7 @@ kvdev_mem_store(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 		free(entry->value);
 		entry->value = buf;
 		entry->value_len = value_len;
+		kvdev_mem_entry_set_ttl(entry, opts);
 		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_SUCCESS, 0);
 		return 0;
 	}
@@ -172,6 +220,7 @@ kvdev_mem_store(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 	memcpy(buf, value, value_len);
 	entry->value = buf;
 	entry->value_len = value_len;
+	kvdev_mem_entry_set_ttl(entry, opts);
 
 	RB_INSERT(kvdev_mem_tree, &mdev->tree, entry);
 	mdev->num_keys++;
@@ -413,6 +462,37 @@ kvdev_mem_create(const struct kvdev_mem_opts *opts, struct spdk_kvdev **_kvdev)
 	*_kvdev = &mdev->kvdev;
 	SPDK_DEBUGLOG(kvdev_mem, "Created in-memory kvdev '%s' (max_value_len=%u, max_num_keys=%u)\n",
 		      opts->name, max_value_len, opts->max_num_keys);
+	return 0;
+}
+
+int
+kvdev_mem_get_entry(const char *name, const void *key, uint8_t key_len,
+		    struct kvdev_mem_entry_info *info)
+{
+	struct spdk_kvdev *kvdev;
+	struct kvdev_mem *mdev;
+	struct kvdev_mem_entry *entry;
+
+	if (name == NULL || key == NULL || info == NULL ||
+	    key_len < SPDK_KVDEV_KEY_MIN_LEN || key_len > SPDK_KVDEV_KEY_MAX_LEN) {
+		return -EINVAL;
+	}
+
+	kvdev = spdk_kvdev_get_by_name(name);
+	if (kvdev == NULL || kvdev->module != &g_kvdev_mem_module) {
+		return -ENODEV;
+	}
+	mdev = SPDK_CONTAINEROF(kvdev, struct kvdev_mem, kvdev);
+
+	entry = kvdev_mem_find(mdev, key, key_len);
+	if (entry == NULL) {
+		return -ENOENT;
+	}
+
+	info->value_len = entry->value_len;
+	info->ttl_valid = entry->ttl_valid;
+	info->ttl = entry->ttl;
+	info->deadline = (uint64_t)entry->deadline;
 	return 0;
 }
 

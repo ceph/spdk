@@ -627,6 +627,95 @@ test_kvdev_mem_list_truncate(void)
 	CU_ASSERT(rc == 0);
 }
 
+/* Vendor TTL extension (ADR-0003): the in-memory backend records the TTL and a
+ * derived deadline on Store, exposed via kvdev_mem_get_entry(), but never
+ * enforces it (a Retrieve after the deadline still returns the value). */
+static void
+test_kvdev_mem_store_ttl(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	struct spdk_kvdev_store_opts opts;
+	struct kvdev_mem_entry_info info;
+	const char key_ttl[] = "ttlkey";
+	const char key_nottl[] = "plainkey";
+	char buf[16];
+	int rc;
+
+	create_test_kvdev("kv9", 0, 0);
+	rc = spdk_kvdev_open("kv9", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	/* Store WITH a TTL: the module must record a deadline. */
+	spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+	opts.flags = SPDK_KVDEV_STORE_F_TTL;
+	opts.ttl = 3600;
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key_ttl, sizeof(key_ttl), "AAAA", 4, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	memset(&info, 0, sizeof(info));
+	rc = kvdev_mem_get_entry("kv9", key_ttl, sizeof(key_ttl), &info);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(info.ttl_valid);
+	CU_ASSERT(info.ttl == 3600);
+	CU_ASSERT(info.deadline != 0);
+
+	/* Store WITHOUT a TTL (NULL opts): no deadline recorded. */
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key_nottl, sizeof(key_nottl), "BBBB", 4, NULL, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	memset(&info, 0, sizeof(info));
+	rc = kvdev_mem_get_entry("kv9", key_nottl, sizeof(key_nottl), &info);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(!info.ttl_valid);
+	CU_ASSERT(info.ttl == 0);
+	CU_ASSERT(info.deadline == 0);
+
+	/* Store WITHOUT a TTL via opts but flag clear: still no deadline. */
+	spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+	opts.ttl = 999; /* present but flag not set -> must be ignored */
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key_ttl, sizeof(key_ttl), "CCCC", 4, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	memset(&info, 0, sizeof(info));
+	rc = kvdev_mem_get_entry("kv9", key_ttl, sizeof(key_ttl), &info);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(!info.ttl_valid);
+	CU_ASSERT(info.ttl == 0);
+
+	/* Store-only: a Retrieve after storing a TTL still returns the value
+	 * (no enforcement). */
+	spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+	opts.flags = SPDK_KVDEV_STORE_F_TTL;
+	opts.ttl = 1;
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key_ttl, sizeof(key_ttl), "DD", 2, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	memset(buf, 0, sizeof(buf));
+	g_completed = false;
+	rc = spdk_kvdev_retrieve(desc, ch, key_ttl, sizeof(key_ttl), buf, sizeof(buf), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_value_len == 2);
+	CU_ASSERT(memcmp(buf, "DD", 2) == 0);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kv9");
+	CU_ASSERT(rc == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -648,6 +737,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_kvdev_mem_list);
 	CU_ADD_TEST(suite, test_kvdev_mem_list_start_key);
 	CU_ADD_TEST(suite, test_kvdev_mem_list_truncate);
+	CU_ADD_TEST(suite, test_kvdev_mem_store_ttl);
 
 	allocate_threads(1);
 	set_thread(0);

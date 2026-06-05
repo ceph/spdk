@@ -29,6 +29,11 @@ static const char *const g_list_keys[] = {
 };
 #define NUM_LIST_KEYS (sizeof(g_list_keys) / sizeof(g_list_keys[0]))
 
+/* TTL (seconds) stored via the vendor _ext API (ADR-0003). The shell driver
+ * reads it back from the target through the kvdev_mem_get_entry RPC and asserts
+ * it round-tripped. */
+#define KV_TEST_TTL_SECONDS 4242
+
 struct kv_ctx {
 	struct spdk_nvme_ctrlr	*ctrlr;
 	struct spdk_nvme_ns	*ns;
@@ -87,7 +92,7 @@ run_no_data(struct kv_ctx *ctx, int (*submit)(struct spdk_nvme_ns *,
 
 	ctx->done = false;
 	ctx->failed = false;
-	rc = submit(ctx->ns, ctx->qpair, g_key, sizeof(g_key), io_complete, ctx);
+	rc = submit(ctx->ns, ctx->qpair, g_key, strlen(g_key), io_complete, ctx);
 	if (rc != 0) {
 		fprintf(stderr, "%s submit failed: %d\n", what, rc);
 		return -1;
@@ -176,6 +181,15 @@ main(int argc, char **argv)
 	fprintf(stderr, "KV format[0]: kvkml=%u kvvml=%u mnks=%u\n",
 		kv_ns_data->kvf[0].kvkml, kv_ns_data->kvf[0].kvvml, kv_ns_data->kvf[0].mnks);
 
+	/* Vendor TTL capability (ADR-0003) is advertised in the KV Identify NS
+	 * vendor-specific capability byte. The shell driver greps for this line. */
+	if (kv_ns_data->vs_cap & SPDK_NVME_KV_NS_VS_CAP_TTL) {
+		fprintf(stderr, "KV TTL capability: SUPPORTED (vs_cap=0x%02x)\n", kv_ns_data->vs_cap);
+	} else {
+		fprintf(stderr, "KV TTL capability: NOT SUPPORTED (vs_cap=0x%02x)\n", kv_ns_data->vs_cap);
+		goto detach;
+	}
+
 	ctx.qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctx.ctrlr, NULL, 0);
 	if (ctx.qpair == NULL) {
 		fprintf(stderr, "Failed to allocate IO qpair\n");
@@ -192,11 +206,14 @@ main(int argc, char **argv)
 	}
 	memcpy(store_buf, g_value, sizeof(g_value));
 
-	/* Store. */
-	rc = spdk_nvme_kv_store(ctx.ns, ctx.qpair, g_key, sizeof(g_key),
-				store_buf, sizeof(g_value), io_complete, &ctx, 0);
+	/* Store with a vendor TTL via the _ext API (ADR-0003). */
+	struct spdk_nvme_kv_store_ext_opts store_opts;
+	spdk_nvme_kv_store_ext_opts_init(&store_opts, sizeof(store_opts));
+	store_opts.ttl = KV_TEST_TTL_SECONDS;
+	rc = spdk_nvme_kv_store_ext(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				    store_buf, sizeof(g_value), io_complete, &ctx, 0, &store_opts);
 	if (rc != 0) {
-		fprintf(stderr, "spdk_nvme_kv_store submit failed: %d\n", rc);
+		fprintf(stderr, "spdk_nvme_kv_store_ext submit failed: %d\n", rc);
 		goto free_qpair;
 	}
 	if (wait_for_completion(&ctx) != 0) {
@@ -204,10 +221,11 @@ main(int argc, char **argv)
 		rc = 1;
 		goto free_qpair;
 	}
-	fprintf(stderr, "KV Store OK (key='%s', %zu value bytes)\n", g_key, sizeof(g_value));
+	fprintf(stderr, "KV Store OK (key='%s', %zu value bytes, ttl=%u)\n",
+		g_key, sizeof(g_value), (unsigned)KV_TEST_TTL_SECONDS);
 
 	/* Retrieve. */
-	rc = spdk_nvme_kv_retrieve(ctx.ns, ctx.qpair, g_key, sizeof(g_key),
+	rc = spdk_nvme_kv_retrieve(ctx.ns, ctx.qpair, g_key, strlen(g_key),
 				   retrieve_buf, buf_len, io_complete, &ctx, 0);
 	if (rc != 0) {
 		fprintf(stderr, "spdk_nvme_kv_retrieve submit failed: %d\n", rc);
@@ -272,16 +290,21 @@ main(int argc, char **argv)
 	/*
 	 * Slice 2 deleted g_key above; the List check below expects g_key to be
 	 * present (expected = NUM_LIST_KEYS + 1), so re-store it before listing.
+	 * Re-store via the vendor _ext API with the TTL so g_key's FINAL state
+	 * carries ttl=KV_TEST_TTL_SECONDS: the shell driver reads it back through
+	 * the kvdev_mem_get_entry RPC after this host process exits (ADR-0003).
 	 */
 	memcpy(store_buf, g_value, sizeof(g_value));
-	rc = spdk_nvme_kv_store(ctx.ns, ctx.qpair, g_key, sizeof(g_key),
-				store_buf, sizeof(g_value), io_complete, &ctx, 0);
+	spdk_nvme_kv_store_ext_opts_init(&store_opts, sizeof(store_opts));
+	store_opts.ttl = KV_TEST_TTL_SECONDS;
+	rc = spdk_nvme_kv_store_ext(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				    store_buf, sizeof(g_value), io_complete, &ctx, 0, &store_opts);
 	if (rc != 0 || wait_for_completion(&ctx) != 0) {
 		fprintf(stderr, "KV re-store of g_key before List failed\n");
 		rc = 1;
 		goto free_qpair;
 	}
-	fprintf(stderr, "KV re-store of g_key before List OK\n");
+	fprintf(stderr, "KV re-store of g_key (with TTL) before List OK\n");
 
 	/* Store several more keys, then List them all back. */
 	for (i = 0; i < NUM_LIST_KEYS; i++) {
@@ -319,10 +342,12 @@ main(int argc, char **argv)
 		bool seen[NUM_LIST_KEYS + 1] = { false };
 		uint32_t j;
 
-		/* g_key was stored with its NUL terminator (sizeof), so its KV key
-		 * length is sizeof(g_key); the list keys were stored with strlen. */
+		/* All keys (g_key and the list keys) are stored with strlen, i.e.
+		 * without the NUL terminator, so List reports them at strlen length.
+		 * This also matches the kvdev_mem_get_entry RPC, which looks up
+		 * g_key by strlen for the TTL round-trip assertion. */
 		all_keys[0] = g_key;
-		all_lens[0] = sizeof(g_key);
+		all_lens[0] = (uint8_t)strlen(g_key);
 		for (j = 0; j < NUM_LIST_KEYS; j++) {
 			all_keys[j + 1] = g_list_keys[j];
 			all_lens[j + 1] = (uint8_t)strlen(g_list_keys[j]);
