@@ -8,6 +8,7 @@
 #include "spdk/stdinc.h"
 #include "spdk/uuid.h"
 #include "spdk/kvdev.h"
+#include "spdk/json.h"
 
 struct kvdev_mem_opts {
 	const char		*name;
@@ -34,5 +35,12 @@ int kvdev_mem_create(const struct kvdev_mem_opts *opts, struct spdk_kvdev **kvde
  * \return 0 on success, negative errno otherwise.
  */
 int kvdev_mem_delete(const char *name);
+
+/**
+ * Emit JSON-RPC methods (kvdev_mem_create) that recreate all current in-memory
+ * kvdevs. Called by the kvdev event subsystem's write_config_json so a saved
+ * config can be reloaded.
+ */
+void kvdev_mem_write_config_json(struct spdk_json_write_ctx *w);
 
 #endif /* SPDK_KVDEV_MEM_H */
