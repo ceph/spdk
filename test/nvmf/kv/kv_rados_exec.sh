@@ -72,10 +72,12 @@ $rpc_py nvmf_create_subsystem "$nqn" -s SPDKKV002 -a
 $rpc_py nvmf_subsystem_add_kv_ns "$nqn" "$kvdev_name"
 $rpc_py nvmf_subsystem_add_listener "$nqn" -t VFIOUSER -a "$muser_dir" -s 0
 
-# Allowlist (ADR-0005): op_id 1 -> kvtest:echo, op_id 2 -> kvtest:upcase.
+# Allowlist (ADR-0005): op_id 1 -> kvtest:echo, op_id 2 -> kvtest:upcase,
+# op_id 3 -> kvtest:fixedout (emits exactly N bytes, N = LE uint32 in the first
+# 4 input bytes; drives the EXACT-FIT and OVER-LARGE BUFFER_TOO_SMALL checks).
 # Binding format is "class:method"; the CLI splits each token on the FIRST ':'
 # into op_id and binding, so "1:kvtest:echo" yields op_id=1 binding="kvtest:echo".
-$rpc_py nvmf_ns_set_kv_exec_allowlist "$nqn" "$nsid" "1:kvtest:echo 2:kvtest:upcase"
+$rpc_py nvmf_ns_set_kv_exec_allowlist "$nqn" "$nsid" "1:kvtest:echo 2:kvtest:upcase 3:kvtest:fixedout"
 get_json=$($rpc_py nvmf_ns_get_kv_exec_allowlist "$nqn" "$nsid")
 echo "nvmf_ns_get_kv_exec_allowlist => $get_json"
 
