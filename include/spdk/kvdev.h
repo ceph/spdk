@@ -257,6 +257,35 @@ struct spdk_kvdev_fn_table {
 	int (*list)(struct spdk_io_channel *ch, const void *start_key, uint8_t start_key_len,
 		    spdk_kvdev_list_cb iter_cb, void *iter_arg,
 		    spdk_kvdev_list_done_cb done_cb, void *done_arg);
+
+	/**
+	 * Execute a server-side operation against a key (vendor extension,
+	 * ADR-0005, "KV Exec"). OPTIONAL: a module may leave this NULL, in which
+	 * case spdk_kvdev_exec() returns -ENOTSUP and the NVMf layer maps the
+	 * command to an NVMe not-supported status. This keeps backends that do
+	 * not (yet) support exec valid (e.g. the librados module, KVX-3).
+	 *
+	 * The operation is selected by a small integer \c op_id (never a
+	 * class/method string on the data path). \c input/input_len carry the
+	 * input blob; the backend writes its output into \c output_buf (at most
+	 * \c output_buf_len bytes). On completion the value_len argument reports
+	 * the TRUE output length: if it exceeds \c output_buf_len the status is
+	 * SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL and output_buf_len bytes are
+	 * still copied (same truncation contract as Retrieve). An unknown op_id
+	 * fails with SPDK_KVDEV_IO_STATUS_INVALID.
+	 *
+	 * \param ch io_channel obtained from get_io_channel().
+	 * \param key Key bytes (key_len in [1,16]).
+	 * \param op_id Operation identifier selecting the server-side operation.
+	 * \param input Input blob bytes (may be NULL when input_len is 0).
+	 * \param input_len Length of \c input in bytes.
+	 * \param output_buf Buffer that receives the output blob.
+	 * \param output_buf_len Capacity of \c output_buf in bytes.
+	 */
+	int (*exec)(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
+		    uint32_t op_id, const void *input, uint32_t input_len,
+		    void *output_buf, uint32_t output_buf_len,
+		    spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 };
 
 /**
@@ -452,6 +481,26 @@ int spdk_kvdev_list(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		    const void *start_key, uint8_t start_key_len,
 		    spdk_kvdev_list_cb iter_cb, void *iter_arg,
 		    spdk_kvdev_list_done_cb done_cb, void *done_arg);
+
+/**
+ * Submit a KV Exec (vendor extension, ADR-0005) on the descriptor's kvdev. Thin
+ * wrapper over the fn_table's optional \c exec op.
+ *
+ * Runs the server-side operation selected by \c op_id against \c key, passing
+ * the \c input blob and scattering the operation's output (bounded by
+ * \c output_buf_len) into \c output_buf. The completion's value_len argument
+ * reports the true output length; if it exceeds \c output_buf_len the status is
+ * SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL (output_buf_len bytes still copied).
+ *
+ * \return 0 if the request was accepted (a completion will fire), -ENOTSUP if
+ *         the backend has no exec op (no completion fires), or another negative
+ *         errno if it could not be submitted.
+ */
+int spdk_kvdev_exec(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		    const void *key, uint8_t key_len, uint32_t op_id,
+		    const void *input, uint32_t input_len,
+		    void *output_buf, uint32_t output_buf_len,
+		    spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 
 #ifdef __cplusplus
 }

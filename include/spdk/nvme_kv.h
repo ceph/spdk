@@ -246,6 +246,49 @@ int spdk_nvme_kv_list(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
 		      void *buffer, uint32_t buffer_len,
 		      spdk_nvme_cmd_cb cb_fn, void *cb_arg);
 
+/**
+ * Submit a vendor KV Exec command (ADR-0005) to the specified NVMe namespace.
+ *
+ * KV Exec runs a server-side operation selected by \c op_id against \c key. It
+ * is bidirectional over a single data buffer: the \c input blob is sent to the
+ * controller, and the controller's output is scattered back into \c output
+ * (bounded by \c output_len). The true output length is returned in the
+ * completion's DW0; if it exceeds \c output_len the output is truncated to
+ * \c output_len bytes (same contract as KV Retrieve), and the command still
+ * succeeds.
+ *
+ * \c input and \c output may be the same buffer. When distinct, the first
+ * \c input_len bytes of \c input are staged into \c output before submission,
+ * so \c output must be DMA-capable and \c input_len must not exceed
+ * \c output_len.
+ *
+ * The command is submitted to a qpair allocated by
+ * spdk_nvme_ctrlr_alloc_io_qpair(). The user must ensure that only one thread
+ * submits I/O on a given qpair at any given time.
+ *
+ * \param ns NVMe namespace to submit the KV Exec command.
+ * \param qpair I/O queue pair to submit the request.
+ * \param key Pointer to the key buffer.
+ * \param key_len Length of the key in bytes (SPDK_NVME_KV_KEY_MIN_LEN to SPDK_NVME_KV_KEY_MAX_LEN).
+ * \param op_id Operation identifier selecting the server-side operation.
+ * \param input Pointer to the input blob (may be NULL when input_len is 0).
+ * \param input_len Length of the input blob in bytes (<= output_len).
+ * \param output Pointer to the (DMA-capable) output buffer.
+ * \param output_len Length of the output buffer in bytes (also the max output).
+ * \param cb_fn Callback function to invoke when the I/O is completed.
+ * \param cb_arg Argument to pass to the callback function.
+ *
+ * \return 0 if successfully submitted, negated errnos on the following error conditions:
+ * -EINVAL: The request is malformed (bad key, NULL/zero output, input_len > output_len).
+ * -ENOMEM: The request cannot be allocated.
+ * -ENXIO: The qpair is failed at the transport level.
+ */
+int spdk_nvme_kv_exec(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
+		      const void *key, uint8_t key_len, uint32_t op_id,
+		      const void *input, uint32_t input_len,
+		      void *output, uint32_t output_len,
+		      spdk_nvme_cmd_cb cb_fn, void *cb_arg);
+
 #ifdef __cplusplus
 }
 #endif
