@@ -186,6 +186,28 @@ nvmf_kvdev_retrieve_done(void *cb_arg, int status, uint32_t value_len)
 }
 
 /*
+ * Completion for KV Exec (ADR-0005). Like Retrieve, the device wrote its output
+ * into the contiguous buffer (a bounce buffer when the payload is multi-iov);
+ * scatter it back out to the request iovs, bounded by the bytes the kvdev
+ * actually produced (value_len) and the host output buffer (xfer_len).
+ */
+static void
+nvmf_kvdev_exec_done(void *cb_arg, int status, uint32_t value_len)
+{
+	struct nvmf_kvdev_request *kv_req = cb_arg;
+	struct spdk_nvmf_request *req = kv_req->req;
+
+	if (kv_req->bounce != NULL &&
+	    (status == SPDK_KVDEV_IO_STATUS_SUCCESS ||
+	     status == SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL)) {
+		spdk_copy_buf_to_iovs(req->iov, req->iovcnt, kv_req->bounce,
+				      spdk_min(value_len, kv_req->xfer_len));
+	}
+
+	nvmf_kvdev_complete(kv_req, status, value_len);
+}
+
+/*
  * Per-key callback for List. Appends one { KL, key, pad } entry to the return
  * data structure being assembled in kv_req->list_buf, immediately after the
  * 4-byte NRK header. Returns false (stop) as soon as the next whole key would
@@ -361,6 +383,46 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		rc = spdk_kvdev_exist(ns->kvdev_desc, ch, key, key_len,
 				      nvmf_kvdev_simple_done, kv_req);
 		break;
+	case SPDK_NVME_OPC_KV_EXEC: {
+		/*
+		 * Vendor KV Exec (ADR-0005). CDW10 = input length (validated above
+		 * against req->length as xfer_len), CDW12 = output buffer size,
+		 * CDW13 = operation ID. The single data buffer carries the input on
+		 * the way in and receives the output on the way out (bidirectional).
+		 */
+		uint32_t input_len = xfer_len;
+		uint32_t output_len = cmd->cdw12_bits.kv_exec.osize;
+		uint32_t op_id = cmd->cdw13_bits.kv_exec.op_id;
+
+		/* The output the device may write back is bounded by the host data
+		 * buffer; clamp the advertised output size and use it as the
+		 * scatter-back bound in nvmf_kvdev_exec_done(). */
+		if (output_len > req->length) {
+			output_len = req->length;
+		}
+		kv_req->xfer_len = output_len;
+
+		/* Gather the input into a contiguous buffer (bounce when multi-iov);
+		 * the device overwrites it with output, then we scatter it back. */
+		data = nvmf_kvdev_get_contig_buf(req, true, kv_req);
+		if (data == NULL) {
+			goto err_nomem;
+		}
+
+		rc = spdk_kvdev_exec(ns->kvdev_desc, ch, key, key_len, op_id,
+				     data, input_len, data, output_len,
+				     nvmf_kvdev_exec_done, kv_req);
+		if (rc == -ENOTSUP) {
+			/* Backend has no exec op (e.g. librados until KVX-3): report
+			 * an NVMe not-supported status. No completion will fire. */
+			free(kv_req->bounce);
+			free(kv_req);
+			rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+			rsp->status.sc = SPDK_NVME_SC_INVALID_OPCODE;
+			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+		}
+		break;
+	}
 	case SPDK_NVME_OPC_KV_LIST: {
 		const void *start_key = key_len > 0 ? key : NULL;
 
