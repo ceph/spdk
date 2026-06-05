@@ -114,7 +114,8 @@ spdk_kvdev_register(struct spdk_kvdev *kvdev)
 	    kvdev->fn_table->store == NULL ||
 	    kvdev->fn_table->retrieve == NULL ||
 	    kvdev->fn_table->del == NULL ||
-	    kvdev->fn_table->exist == NULL) {
+	    kvdev->fn_table->exist == NULL ||
+	    kvdev->fn_table->list == NULL) {
 		SPDK_ERRLOG("kvdev '%s' fn_table is missing required ops\n", kvdev->name);
 		return -EINVAL;
 	}
@@ -281,6 +282,34 @@ spdk_kvdev_exist(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 	}
 
 	return kvdev->fn_table->exist(ch, key, key_len, cb_fn, cb_arg);
+}
+
+int
+spdk_kvdev_list(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		const void *start_key, uint8_t start_key_len,
+		spdk_kvdev_list_cb iter_cb, void *iter_arg,
+		spdk_kvdev_list_done_cb done_cb, void *done_arg)
+{
+	struct spdk_kvdev *kvdev = desc->kvdev;
+
+	if (iter_cb == NULL || done_cb == NULL) {
+		return -EINVAL;
+	}
+
+	/* start_key is a position into the stable key order. NULL means "from the
+	 * beginning" (start_key_len must then be 0); otherwise it is an ordinary
+	 * key and must satisfy the same length bounds as store/retrieve. */
+	if (start_key == NULL) {
+		if (start_key_len != 0) {
+			return -EINVAL;
+		}
+	} else if (start_key_len < SPDK_KVDEV_KEY_MIN_LEN ||
+		   start_key_len > kvdev->caps.max_key_len) {
+		return -EINVAL;
+	}
+
+	return kvdev->fn_table->list(ch, start_key, start_key_len, iter_cb, iter_arg,
+				     done_cb, done_arg);
 }
 
 SPDK_LOG_REGISTER_COMPONENT(kvdev)

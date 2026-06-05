@@ -33,7 +33,28 @@ struct nvmf_kvdev_request {
 	/* Host buffer size from CDW10 (bytes the host actually offered). The
 	 * bounce buffer is only valid up to this many bytes. */
 	uint32_t			xfer_len;
+
+	/* List-only: where the return data structure is being assembled (either
+	 * the single request iov or the bounce buffer) and how it is filling up. */
+	uint8_t				*list_buf;
+	/* Bytes of list_buf already consumed by the NRK header + emitted keys. */
+	uint32_t			list_off;
+	/* Total bytes available in list_buf (== host buffer size, CDW10). */
+	uint32_t			list_cap;
 };
+
+/* List return data structure layout (KV spec §3.2.2.2, Figures 15/16):
+ *   uint32_t Number of Returned Keys (NRK)
+ *   repeated { uint16_t Key Length; key bytes; pad to 4-byte boundary }
+ */
+#define NVMF_KV_LIST_NRK_SIZE 4
+
+/* Bytes occupied by one key entry (2-byte KL + key + pad to 4-byte boundary). */
+static inline uint32_t
+nvmf_kv_list_entry_size(uint8_t key_len)
+{
+	return SPDK_ALIGN_CEIL(sizeof(uint16_t) + key_len, 4);
+}
 
 void
 nvmf_kvdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_kv_ns_data *nsdata)
@@ -160,6 +181,61 @@ nvmf_kvdev_retrieve_done(void *cb_arg, int status, uint32_t value_len)
 }
 
 /*
+ * Per-key callback for List. Appends one { KL, key, pad } entry to the return
+ * data structure being assembled in kv_req->list_buf, immediately after the
+ * 4-byte NRK header. Returns false (stop) as soon as the next whole key would
+ * not fit in the host buffer, so the structure only ever contains complete
+ * keys (KV spec: number returned = keys that completely fit).
+ */
+static bool
+nvmf_kvdev_list_iter(void *cb_arg, const void *key, uint8_t key_len)
+{
+	struct nvmf_kvdev_request *kv_req = cb_arg;
+	uint32_t entry_size = nvmf_kv_list_entry_size(key_len);
+	uint8_t *p;
+	uint16_t kl16 = key_len;
+
+	if (kv_req->list_off + entry_size > kv_req->list_cap) {
+		/* This whole key would not fit; stop without emitting it. */
+		return false;
+	}
+
+	p = kv_req->list_buf + kv_req->list_off;
+	memcpy(p, &kl16, sizeof(kl16));
+	memcpy(p + sizeof(kl16), key, key_len);
+	/* Zero any pad bytes between the key and the 4-byte boundary. */
+	memset(p + sizeof(kl16) + key_len, 0,
+	       entry_size - sizeof(kl16) - key_len);
+
+	kv_req->list_off += entry_size;
+	return true;
+}
+
+static void
+nvmf_kvdev_list_done(void *cb_arg, int status, uint32_t num_keys)
+{
+	struct nvmf_kvdev_request *kv_req = cb_arg;
+	struct spdk_nvmf_request *req = kv_req->req;
+	uint32_t nrk = num_keys;
+
+	if (status == SPDK_KVDEV_IO_STATUS_SUCCESS) {
+		/* Patch the Number of Returned Keys header now that iteration is
+		 * done, then scatter the assembled structure back if we built it in
+		 * a bounce buffer. */
+		memcpy(kv_req->list_buf, &nrk, sizeof(nrk));
+
+		if (kv_req->bounce != NULL) {
+			spdk_copy_buf_to_iovs(req->iov, req->iovcnt, kv_req->bounce,
+					      kv_req->list_off);
+		}
+	}
+
+	/* value_len is unused for List (status is mapped to the CQE by
+	 * nvmf_kvdev_complete; SUCCESS leaves cdw0 == 0). */
+	nvmf_kvdev_complete(kv_req, status, 0);
+}
+
+/*
  * Obtain a contiguous data pointer for the request payload. When the request
  * has a single iov we can use it directly; otherwise we allocate a bounce
  * buffer (gathered for store, scattered after retrieve).
@@ -201,7 +277,10 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 	int rc;
 
 	nvmf_kvdev_decode_key(cmd, key, &key_len);
-	if (key_len < SPDK_KVDEV_KEY_MIN_LEN || key_len > SPDK_KVDEV_KEY_MAX_LEN) {
+	/* List uses the key as a START POSITION, where length 0 means "from the
+	 * beginning"; every other KV command requires a real 1..16 byte key. */
+	if (key_len > SPDK_KVDEV_KEY_MAX_LEN ||
+	    (key_len < SPDK_KVDEV_KEY_MIN_LEN && cmd->opc != SPDK_NVME_OPC_KV_LIST)) {
 		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
 		rsp->status.sc = SPDK_NVME_SC_INVALID_KEY_SIZE;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
@@ -270,8 +349,34 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		rc = spdk_kvdev_exist(ns->kvdev_desc, ch, key, key_len,
 				      nvmf_kvdev_simple_done, kv_req);
 		break;
+	case SPDK_NVME_OPC_KV_LIST: {
+		const void *start_key = key_len > 0 ? key : NULL;
+
+		/* The host buffer (CDW10) must hold at least the 4-byte NRK header. */
+		if (xfer_len < NVMF_KV_LIST_NRK_SIZE) {
+			free(kv_req);
+			rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+			rsp->status.sc = SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID;
+			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+		}
+
+		/* Assemble the return structure in a contiguous buffer (bounce when
+		 * the payload is multi-iov). list_off starts past the NRK header,
+		 * which nvmf_kvdev_list_done() patches once the count is known. */
+		data = nvmf_kvdev_get_contig_buf(req, false, kv_req);
+		if (data == NULL) {
+			goto err_nomem;
+		}
+		kv_req->list_buf = data;
+		kv_req->list_cap = xfer_len;
+		kv_req->list_off = NVMF_KV_LIST_NRK_SIZE;
+
+		rc = spdk_kvdev_list(ns->kvdev_desc, ch, start_key, key_len,
+				     nvmf_kvdev_list_iter, kv_req,
+				     nvmf_kvdev_list_done, kv_req);
+		break;
+	}
 	default:
-		/* TODO (later slices): list. */
 		SPDK_ERRLOG("Unsupported KV opcode 0x%02x\n", cmd->opc);
 		free(kv_req);
 		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
