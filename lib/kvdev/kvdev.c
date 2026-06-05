@@ -312,4 +312,28 @@ spdk_kvdev_list(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 				     done_cb, done_arg);
 }
 
+int
+spdk_kvdev_exec(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		const void *key, uint8_t key_len, uint32_t op_id,
+		const void *input, uint32_t input_len,
+		void *output_buf, uint32_t output_buf_len,
+		spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct spdk_kvdev *kvdev = desc->kvdev;
+
+	if (key == NULL || key_len < SPDK_KVDEV_KEY_MIN_LEN || key_len > kvdev->caps.max_key_len) {
+		return -EINVAL;
+	}
+
+	/* exec is OPTIONAL in the vtable: a backend that does not implement it
+	 * (e.g. the librados module until KVX-3) leaves this NULL. Report -ENOTSUP
+	 * so the NVMf layer can return an NVMe not-supported status. */
+	if (kvdev->fn_table->exec == NULL) {
+		return -ENOTSUP;
+	}
+
+	return kvdev->fn_table->exec(ch, key, key_len, op_id, input, input_len,
+				     output_buf, output_buf_len, cb_fn, cb_arg);
+}
+
 SPDK_LOG_REGISTER_COMPONENT(kvdev)

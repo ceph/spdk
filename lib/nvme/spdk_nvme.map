@@ -280,6 +280,7 @@
 	spdk_nvme_kv_delete;
 	spdk_nvme_kv_exist;
 	spdk_nvme_kv_list;
+	spdk_nvme_kv_exec;
 
 	# public functions from nvme_ocssd.h
 	spdk_nvme_ctrlr_is_ocssd_supported;

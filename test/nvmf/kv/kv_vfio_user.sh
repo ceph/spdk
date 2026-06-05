@@ -67,6 +67,14 @@ if [[ $rc -eq 0 ]]; then
 fi
 
 if [[ $rc -eq 0 ]]; then
+	# Assert the vendor KV Exec (ADR-0005) round-trip (echo + append) succeeded.
+	if ! grep -q "PASS: KV Exec (echo + append) round-trip succeeded" "$host_log"; then
+		echo "kv_vfio_user: FAIL (KV Exec round-trip did not succeed)"
+		rc=1
+	fi
+fi
+
+if [[ $rc -eq 0 ]]; then
 	# Assert the TTL round-tripped into the backend (store-only persistence).
 	entry_json=$($rpc_py kvdev_mem_get_entry "$kvdev_name" "$host_key")
 	echo "kvdev_mem_get_entry => $entry_json"
