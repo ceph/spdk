@@ -84,14 +84,30 @@ kvdev_mem_find(struct kvdev_mem *mdev, const void *key, uint8_t key_len)
 	return RB_FIND(kvdev_mem_tree, &mdev->tree, &find);
 }
 
+/*
+ * Read the store flags from an extensible options struct, honouring its size
+ * field so a caller built against an older/newer header is handled safely.
+ */
+static uint32_t
+kvdev_mem_store_flags(const struct spdk_kvdev_store_opts *opts)
+{
+	if (opts == NULL || opts->size < offsetof(struct spdk_kvdev_store_opts, flags) +
+	    sizeof(opts->flags)) {
+		return SPDK_KVDEV_STORE_FLAG_NONE;
+	}
+	return opts->flags;
+}
+
 static int
 kvdev_mem_store(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 		const void *value, uint32_t value_len,
+		const struct spdk_kvdev_store_opts *opts,
 		spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
 {
 	struct kvdev_mem_io_channel *mch = spdk_io_channel_get_ctx(ch);
 	struct kvdev_mem *mdev = mch->mdev;
 	struct kvdev_mem_entry *entry;
+	uint32_t flags = kvdev_mem_store_flags(opts);
 	void *buf;
 
 	if (value_len > mdev->kvdev.caps.max_value_len) {
@@ -101,6 +117,11 @@ kvdev_mem_store(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 
 	entry = kvdev_mem_find(mdev, key, key_len);
 	if (entry != NULL) {
+		/* Store-If-No-Key-Exists (SINKE): the key already exists, so reject. */
+		if (flags & SPDK_KVDEV_STORE_FLAG_SINKE) {
+			cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_KEY_EXIST, 0);
+			return 0;
+		}
 		/* Overwrite existing value. */
 		buf = malloc(value_len ? value_len : 1);
 		if (buf == NULL) {
@@ -112,6 +133,12 @@ kvdev_mem_store(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 		entry->value = buf;
 		entry->value_len = value_len;
 		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_SUCCESS, 0);
+		return 0;
+	}
+
+	/* Store-If-Key-Exists (SIKE): the key is absent, so reject. */
+	if (flags & SPDK_KVDEV_STORE_FLAG_SIKE) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST, 0);
 		return 0;
 	}
 

@@ -4754,9 +4754,29 @@ get_nvmf_io_req_length(struct spdk_nvmf_request *req)
 	}
 
 	/* Key-Value commands carry the transfer length (value or host buffer
-	 * size) in CDW10, independent of any block geometry. */
+	 * size) in CDW10, independent of any block geometry. Only the data-bearing
+	 * opcodes have a payload; Delete/Exist carry no host data. */
 	if (ns->csi == SPDK_NVME_CSI_KV) {
-		return cmd->cdw10_bits.kv.vsize;
+		uint32_t kv_len;
+
+		switch (cmd->opc) {
+		case SPDK_NVME_OPC_KV_STORE:
+		case SPDK_NVME_OPC_KV_RETRIEVE:
+		case SPDK_NVME_OPC_KV_LIST:
+			kv_len = cmd->cdw10_bits.kv.vsize;
+			/* The caller treats the return value as a signed int; clamp so a
+			 * host-supplied vsize > INT_MAX cannot wrap to a negative length. */
+			if (kv_len > INT_MAX) {
+				SPDK_ERRLOG("KV transfer length %u exceeds INT_MAX\n", kv_len);
+				return -EINVAL;
+			}
+			return kv_len;
+		case SPDK_NVME_OPC_KV_DELETE:
+		case SPDK_NVME_OPC_KV_EXIST:
+		default:
+			/* No host data transfer. */
+			return 0;
+		}
 	}
 
 	if (cmd->opc == SPDK_NVME_OPC_DATASET_MANAGEMENT) {
