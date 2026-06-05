@@ -219,6 +219,7 @@ run_test "unittest_iscsi" unittest_iscsi
 run_test "unittest_json" unittest_json
 run_test "unittest_rpc" unittest_rpc
 run_test "unittest_notify" $valgrind $testdir/lib/notify/notify.c/notify_ut
+run_test "unittest_kvdev" $valgrind $testdir/lib/kvdev/kvdev_mem.c/kvdev_mem_ut
 run_test "unittest_nvme" unittest_nvme
 run_test "unittest_log" $valgrind $testdir/lib/log/log.c/log_ut
 run_test "unittest_lvol" $valgrind $testdir/lib/lvol/lvol.c/lvol_ut
