@@ -6,7 +6,7 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-DIRS-y += bdev accel scheduler iscsi nvmf scsi sock iobuf keyring
+DIRS-y += bdev accel scheduler iscsi nvmf scsi sock iobuf keyring kvdev
 
 ifeq ($(OS),Linux)
 DIRS-y += nbd
@@ -29,7 +29,7 @@ DEPDIRS-bdev := accel sock iobuf keyring
 DEPDIRS-iscsi := scsi
 DEPDIRS-nbd := bdev
 DEPDIRS-ublk := bdev iobuf
-DEPDIRS-nvmf := bdev accel iobuf
+DEPDIRS-nvmf := bdev accel iobuf kvdev
 DEPDIRS-scsi := bdev
 DEPDIRS-vhost_scsi := scsi
 DEPDIRS-vfu_tgt := bdev scsi
