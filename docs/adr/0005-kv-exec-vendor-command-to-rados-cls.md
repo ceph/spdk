@@ -46,6 +46,11 @@ vendor TTL ([0003](0003-vendor-ttl-extension-to-kv-store.md)).
   [0002](0002-rados-object-per-kv-pair.md)) — `rados_exec` is rados-specific. The opcode,
   host API, kvdev `exec` vtable op, and an in-memory built-in can land earlier; the
   `rados_aio_exec` mapping and the allowlist/sidecar follow the rados backend.
+- **The cls classes are custom, authored later — NOT stock Ceph classes.** The KVX epic
+  delivers only the plumbing to invoke an allowlisted (class, method) via `rados_exec`;
+  the actual custom object-class plugin(s) and their OSD-side build/load/deploy story are
+  a separate, later effort. (KVX-3 testing against a vstart cluster can use a trivial
+  throwaway cls just to exercise the path.)
 - Considered and rejected: NVMe Computational Programs command set (too large for "call a
   named cls method"); overloading Store/Retrieve (conflates data with RPC, not atomic);
   class/method strings on the data path (attacker-controlled strings, per-IO matching).
