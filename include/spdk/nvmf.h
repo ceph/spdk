@@ -1348,6 +1348,55 @@ uint32_t spdk_nvmf_subsystem_add_kv_ns(struct spdk_nvmf_subsystem *subsystem,
 				       const struct spdk_nvmf_ns_opts *opts, size_t opts_size);
 
 /**
+ * One entry of a namespace's KV Exec allowlist (vendor extension, ADR-0005).
+ */
+struct spdk_nvmf_kv_exec_allow {
+	/** Permitted KV Exec operation ID. */
+	uint32_t	op_id;
+	/** Optional opaque binding descriptor (NULL if unset). */
+	const char	*binding;
+};
+
+/**
+ * Replace the KV Exec allowlist of a namespace (vendor extension, ADR-0005).
+ *
+ * The allowlist is per (subsystem, nsid) and default-deny: only op-IDs present
+ * in it may be executed via the vendor KV Exec command; an absent op-ID is
+ * rejected before the backend runs. This call REPLACES the namespace's entire
+ * allowlist with \c entries (passing count 0 clears it).
+ *
+ * The namespace must be a Key-Value namespace (added via
+ * spdk_nvmf_subsystem_add_kv_ns); otherwise this returns -EINVAL.
+ *
+ * \param subsystem Subsystem owning the namespace.
+ * \param nsid Namespace ID.
+ * \param entries Array of allowlist entries (copied; caller retains ownership).
+ * \param count Number of entries in \c entries.
+ *
+ * \return 0 on success, negative errno on failure.
+ */
+int spdk_nvmf_ns_set_kv_exec_allowlist(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid,
+				       const struct spdk_nvmf_kv_exec_allow *entries, uint32_t count);
+
+/**
+ * Get the KV Exec allowlist of a namespace (vendor extension, ADR-0005).
+ *
+ * On success \c *entries points at the namespace's internal entry array (valid
+ * until the allowlist is next modified or the namespace is destroyed; do not
+ * free) and \c *count is the number of entries.
+ *
+ * \param subsystem Subsystem owning the namespace.
+ * \param nsid Namespace ID.
+ * \param entries Output: pointer to the internal entry array (may be NULL when
+ *                count is 0).
+ * \param count Output: number of entries.
+ *
+ * \return 0 on success, negative errno on failure (e.g. -EINVAL if not a KV ns).
+ */
+int spdk_nvmf_ns_get_kv_exec_allowlist(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid,
+				       const struct spdk_nvmf_kv_exec_allow **entries, uint32_t *count);
+
+/**
  * Remove a namespace from a subsystem.
  *
  * May only be performed on subsystems in the PAUSED or INACTIVE states.
