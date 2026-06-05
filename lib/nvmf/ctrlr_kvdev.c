@@ -128,6 +128,16 @@ nvmf_kvdev_store_done(void *cb_arg, int status, uint32_t value_len)
 	nvmf_kvdev_complete(cb_arg, status, value_len);
 }
 
+/*
+ * Completion for the no-data KV ops (Delete, Exist): there is no payload to
+ * scatter back, so just translate the status. value_len is unused.
+ */
+static void
+nvmf_kvdev_simple_done(void *cb_arg, int status, uint32_t value_len)
+{
+	nvmf_kvdev_complete(cb_arg, status, value_len);
+}
+
 static void
 nvmf_kvdev_retrieve_done(void *cb_arg, int status, uint32_t value_len)
 {
@@ -250,8 +260,18 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		rc = spdk_kvdev_retrieve(ns->kvdev_desc, ch, key, key_len, data, xfer_len,
 					 nvmf_kvdev_retrieve_done, kv_req);
 		break;
+	case SPDK_NVME_OPC_KV_DELETE:
+		/* No-data command: no host payload, so bypass the bounce/value path. */
+		rc = spdk_kvdev_delete(ns->kvdev_desc, ch, key, key_len,
+				       nvmf_kvdev_simple_done, kv_req);
+		break;
+	case SPDK_NVME_OPC_KV_EXIST:
+		/* No-data command: no host payload, so bypass the bounce/value path. */
+		rc = spdk_kvdev_exist(ns->kvdev_desc, ch, key, key_len,
+				      nvmf_kvdev_simple_done, kv_req);
+		break;
 	default:
-		/* TODO (later slices): delete, exist, list. */
+		/* TODO (later slices): list. */
 		SPDK_ERRLOG("Unsupported KV opcode 0x%02x\n", cmd->opc);
 		free(kv_req);
 		rsp->status.sct = SPDK_NVME_SCT_GENERIC;
