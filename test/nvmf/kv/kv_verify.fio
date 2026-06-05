@@ -1,0 +1,37 @@
+# SPDK NVMe-KV fio job: random write then read-verify against a KV namespace.
+#
+# The SPDK NVMe fio plugin maps this block/offset workload onto KV verbs:
+#   write -> KV Store, read -> KV Retrieve, trim -> KV Delete.
+# Each fio block (of size `bs`) is one KV object; the object's key is derived
+# deterministically from the io_u offset (offset / bs, big-endian), so a write
+# and a later read at the same offset hit the same key and `verify` round-trips.
+#
+# The filename (NVMe transport URI) is provided on the fio command line via
+# --filename=... by the e2e driver (kv_fio_verify.sh), e.g.:
+#   trtype=VFIOUSER traddr=/path/to/muser/dir subnqn=<nqn> ns=1
+#
+# Notes / constraints for KV namespaces:
+#   * Use a single fixed blocksize (bs=...); bsrange / split block sizes are
+#     rejected because the offset->key mapping needs a fixed object size.
+#   * do_verify=1 with verify=crc32c makes fio re-read every written object and
+#     check the payload, exercising Store-then-Retrieve correctness.
+
+[global]
+ioengine=spdk
+thread=1
+group_reporting=1
+direct=1
+# Single, fixed object/value size.
+bs=4096
+# Bound the keyspace explicitly (number of distinct objects = size / bs).
+size=4m
+iodepth=32
+
+# Write every object, then verify by reading each one back and checking the CRC.
+rw=randwrite
+verify=crc32c
+do_verify=1
+verify_fatal=1
+
+[kv-verify]
+numjobs=1
