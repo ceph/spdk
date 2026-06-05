@@ -320,6 +320,107 @@ test_kvdev_mem_store_conditional(void)
 	CU_ASSERT(rc == 0);
 }
 
+static void
+test_kvdev_mem_delete(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	const char key[] = "delkey";
+	char buf[16];
+	int rc;
+
+	create_test_kvdev("kv7", 0, 0);
+	rc = spdk_kvdev_open("kv7", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	/* Delete on an absent key must fail KEY_NOT_EXIST. */
+	g_completed = false;
+	rc = spdk_kvdev_delete(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_completed);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
+
+	/* Store, then delete: delete must succeed. */
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "data", 4, NULL, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	g_completed = false;
+	rc = spdk_kvdev_delete(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_completed);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	/* The key must now be gone: a Retrieve returns KEY_NOT_EXIST. */
+	g_completed = false;
+	rc = spdk_kvdev_retrieve(desc, ch, key, sizeof(key), buf, sizeof(buf), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
+
+	/* A second delete of the now-absent key must again fail KEY_NOT_EXIST. */
+	g_completed = false;
+	rc = spdk_kvdev_delete(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kv7");
+	CU_ASSERT(rc == 0);
+}
+
+static void
+test_kvdev_mem_exist(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	const char key[] = "exkey";
+	int rc;
+
+	create_test_kvdev("kv8", 0, 0);
+	rc = spdk_kvdev_open("kv8", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	/* Exist on an absent key must report KEY_NOT_EXIST. */
+	g_completed = false;
+	rc = spdk_kvdev_exist(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_completed);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
+
+	/* After a store, Exist must report SUCCESS (present). */
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "v", 1, NULL, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	g_completed = false;
+	rc = spdk_kvdev_exist(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_completed);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	/* After a delete, Exist must again report KEY_NOT_EXIST. */
+	rc = spdk_kvdev_delete(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	g_completed = false;
+	rc = spdk_kvdev_exist(desc, ch, key, sizeof(key), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kv8");
+	CU_ASSERT(rc == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -336,6 +437,8 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_kvdev_mem_caps);
 	CU_ADD_TEST(suite, test_kvdev_mem_max_keys);
 	CU_ADD_TEST(suite, test_kvdev_mem_store_conditional);
+	CU_ADD_TEST(suite, test_kvdev_mem_delete);
+	CU_ADD_TEST(suite, test_kvdev_mem_exist);
 
 	allocate_threads(1);
 	set_thread(0);

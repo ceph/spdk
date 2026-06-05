@@ -28,6 +28,9 @@ struct kv_ctx {
 	struct spdk_nvme_qpair	*qpair;
 	volatile bool		done;
 	volatile bool		failed;
+	/* Status code (sct/sc) of the most recently completed command. */
+	volatile uint8_t	last_sct;
+	volatile uint8_t	last_sc;
 };
 
 static bool
@@ -51,6 +54,9 @@ io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 {
 	struct kv_ctx *ctx = arg;
 
+	ctx->last_sct = cpl->status.sct;
+	ctx->last_sc = cpl->status.sc;
+
 	if (spdk_nvme_cpl_is_error(cpl)) {
 		fprintf(stderr, "KV command failed: sct=%d sc=%d\n",
 			cpl->status.sct, cpl->status.sc);
@@ -59,6 +65,34 @@ io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 		fprintf(stderr, "KV command completed: cdw0=%u\n", cpl->cdw0);
 	}
 	ctx->done = true;
+}
+
+/*
+ * Submit a no-data KV command (Delete or Exist) and wait for it, returning the
+ * NVMe status code (sc) the device reported. sct is asserted to be GENERIC.
+ */
+static int
+run_no_data(struct kv_ctx *ctx, int (*submit)(struct spdk_nvme_ns *,
+		struct spdk_nvme_qpair *, const void *, uint8_t,
+		spdk_nvme_cmd_cb, void *), const char *what)
+{
+	int rc;
+
+	ctx->done = false;
+	ctx->failed = false;
+	rc = submit(ctx->ns, ctx->qpair, g_key, sizeof(g_key), io_complete, ctx);
+	if (rc != 0) {
+		fprintf(stderr, "%s submit failed: %d\n", what, rc);
+		return -1;
+	}
+	while (!ctx->done) {
+		spdk_nvme_qpair_process_completions(ctx->qpair, 0);
+	}
+	if (ctx->last_sct != SPDK_NVME_SCT_GENERIC) {
+		fprintf(stderr, "%s: unexpected sct=%u\n", what, ctx->last_sct);
+		return -1;
+	}
+	return ctx->last_sc;
 }
 
 static int
@@ -84,6 +118,7 @@ main(int argc, char **argv)
 	char *retrieve_buf = NULL;
 	const uint32_t buf_len = 256;
 	int rc = 1;
+	int sc;
 
 	if (argc < 2) {
 		fprintf(stderr, "Usage: %s <vfio-user-socket-path>\n", argv[0]);
@@ -183,7 +218,46 @@ main(int argc, char **argv)
 	}
 
 	fprintf(stderr, "KV Retrieve OK; bytes round-tripped: '%s'\n", retrieve_buf);
-	fprintf(stderr, "PASS: KV Store/Retrieve round-trip succeeded\n");
+
+	/*
+	 * Slice 2: Exist + Delete. With the key present, Exist must report
+	 * SUCCESS (00h). After Delete, Exist must report KV Key Does Not Exist
+	 * (87h). Each assertion checks the exact NVMe status code from the CQE.
+	 */
+	sc = run_no_data(&ctx, spdk_nvme_kv_exist, "KV Exist (present)");
+	if (sc != SPDK_NVME_SC_SUCCESS) {
+		fprintf(stderr, "FAIL: Exist on present key returned sc=0x%02x, expected 0x00\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Exist (present) OK: sc=0x00 (SUCCESS)\n");
+
+	sc = run_no_data(&ctx, spdk_nvme_kv_delete, "KV Delete");
+	if (sc != SPDK_NVME_SC_SUCCESS) {
+		fprintf(stderr, "FAIL: Delete of present key returned sc=0x%02x, expected 0x00\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Delete OK: sc=0x00 (SUCCESS)\n");
+
+	sc = run_no_data(&ctx, spdk_nvme_kv_exist, "KV Exist (absent)");
+	if (sc != SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST) {
+		fprintf(stderr, "FAIL: Exist on absent key returned sc=0x%02x, expected 0x87\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Exist (absent) OK: sc=0x87 (KEY_DOES_NOT_EXIST)\n");
+
+	/* A Delete of the now-absent key must also report 87h. */
+	sc = run_no_data(&ctx, spdk_nvme_kv_delete, "KV Delete (absent)");
+	if (sc != SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST) {
+		fprintf(stderr, "FAIL: Delete of absent key returned sc=0x%02x, expected 0x87\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Delete (absent) OK: sc=0x87 (KEY_DOES_NOT_EXIST)\n");
+
+	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete sequence succeeded\n");
 	rc = 0;
 
 free_qpair:

@@ -16,6 +16,8 @@
 	spdk_kvdev_get_io_channel;
 	spdk_kvdev_store;
 	spdk_kvdev_retrieve;
+	spdk_kvdev_delete;
+	spdk_kvdev_exist;
 
 	local: *;
 };

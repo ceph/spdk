@@ -112,7 +112,9 @@ spdk_kvdev_register(struct spdk_kvdev *kvdev)
 
 	if (kvdev->fn_table->get_io_channel == NULL ||
 	    kvdev->fn_table->store == NULL ||
-	    kvdev->fn_table->retrieve == NULL) {
+	    kvdev->fn_table->retrieve == NULL ||
+	    kvdev->fn_table->del == NULL ||
+	    kvdev->fn_table->exist == NULL) {
 		SPDK_ERRLOG("kvdev '%s' fn_table is missing required ops\n", kvdev->name);
 		return -EINVAL;
 	}
@@ -251,6 +253,34 @@ spdk_kvdev_retrieve(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 	}
 
 	return kvdev->fn_table->retrieve(ch, key, key_len, value_buf, buf_len, cb_fn, cb_arg);
+}
+
+int
+spdk_kvdev_delete(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		  const void *key, uint8_t key_len,
+		  spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct spdk_kvdev *kvdev = desc->kvdev;
+
+	if (key == NULL || key_len < SPDK_KVDEV_KEY_MIN_LEN || key_len > kvdev->caps.max_key_len) {
+		return -EINVAL;
+	}
+
+	return kvdev->fn_table->del(ch, key, key_len, cb_fn, cb_arg);
+}
+
+int
+spdk_kvdev_exist(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		 const void *key, uint8_t key_len,
+		 spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct spdk_kvdev *kvdev = desc->kvdev;
+
+	if (key == NULL || key_len < SPDK_KVDEV_KEY_MIN_LEN || key_len > kvdev->caps.max_key_len) {
+		return -EINVAL;
+	}
+
+	return kvdev->fn_table->exist(ch, key, key_len, cb_fn, cb_arg);
 }
 
 SPDK_LOG_REGISTER_COMPONENT(kvdev)
