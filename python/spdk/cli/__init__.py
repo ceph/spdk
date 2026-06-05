@@ -9,6 +9,7 @@ from . import fsdev as fsdev
 from . import iobuf as iobuf
 from . import iscsi as iscsi
 from . import keyring as keyring
+from . import kvdev as kvdev
 from . import log as log
 from . import lvol as lvol
 from . import misc as misc

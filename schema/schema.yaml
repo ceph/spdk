@@ -1837,6 +1837,61 @@ methods:
         type: uint64
         required: true
         description: Bdev new capacity in MiB
+  - name: kvdev_mem_create
+    description: 'Create an in-memory kvdev'
+    result:
+      type: string
+      description: Name of newly created kvdev.
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the in-memory kvdev to create
+      - name: uuid
+        type: uuid
+        description: UUID of the kvdev (optional)
+      - name: max_value_len
+        type: uint32
+        description: Maximum value length in bytes (optional, 0 for default)
+      - name: max_num_keys
+        type: uint32
+        description: Maximum number of keys (optional, 0 for unlimited)
+  - name: kvdev_mem_delete
+    description: 'Delete an in-memory kvdev'
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the in-memory kvdev to delete
+  - name: nvmf_subsystem_add_kv_ns
+    description: 'Add a Key-Value namespace to an NVMe-oF subsystem'
+    result:
+      type: uint32
+      description: Namespace ID of the added namespace
+    params:
+      - name: nqn
+        type: string
+        required: true
+        description: Subsystem NQN
+      - name: kvdev_name
+        type: string
+        required: true
+        description: 'The name of the kvdev that will back this KV namespace'
+      - name: nsid
+        type: uint32
+        description: Namespace ID
+      - name: anagrpid
+        type: uint32
+        description: ANA group ID
+      - name: uuid
+        type: uuid
+        description: Namespace UUID
+      - name: tgt_name
+        type: string
+        description: Parent NVMe-oF target name
   - name: bdev_aio_create
     description: 'Construct @ref bdev_config_aio.'
     result:
