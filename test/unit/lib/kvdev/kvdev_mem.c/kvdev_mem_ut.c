@@ -29,6 +29,48 @@ kv_op_cb(void *cb_arg, int status, uint32_t value_len)
 	g_completed = true;
 }
 
+/* List harness: collect the keys the backend visits into g_listed_keys, with an
+ * optional cap (g_list_max) to emulate a host buffer that only holds so many
+ * whole keys. */
+#define LIST_MAX_KEYS 32
+static char g_listed_keys[LIST_MAX_KEYS][SPDK_KVDEV_KEY_MAX_LEN + 1];
+static uint8_t g_listed_lens[LIST_MAX_KEYS];
+static uint32_t g_listed_count;
+static uint32_t g_list_max;        /* stop accepting once this many emitted (0 = unlimited) */
+static uint32_t g_list_done_count; /* num_keys reported by done_cb */
+
+static void
+list_reset(uint32_t max)
+{
+	memset(g_listed_keys, 0, sizeof(g_listed_keys));
+	memset(g_listed_lens, 0, sizeof(g_listed_lens));
+	g_listed_count = 0;
+	g_list_max = max;
+	g_list_done_count = 0;
+	g_completed = false;
+}
+
+static bool
+list_iter_cb(void *cb_arg, const void *key, uint8_t key_len)
+{
+	if (g_list_max != 0 && g_listed_count >= g_list_max) {
+		return false;
+	}
+	SPDK_CU_ASSERT_FATAL(g_listed_count < LIST_MAX_KEYS);
+	memcpy(g_listed_keys[g_listed_count], key, key_len);
+	g_listed_lens[g_listed_count] = key_len;
+	g_listed_count++;
+	return true;
+}
+
+static void
+list_done_cb(void *cb_arg, int status, uint32_t num_keys)
+{
+	g_status = status;
+	g_list_done_count = num_keys;
+	g_completed = true;
+}
+
 static struct spdk_kvdev *
 create_test_kvdev(const char *name, uint32_t max_value_len, uint32_t max_num_keys)
 {
@@ -421,6 +463,170 @@ test_kvdev_mem_exist(void)
 	CU_ASSERT(rc == 0);
 }
 
+static void
+list_store_key(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch, const char *key)
+{
+	int rc;
+
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key, (uint8_t)strlen(key), "v", 1, NULL, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+}
+
+/* Store N keys and confirm List returns every one of them (the in-memory RB
+ * tree yields a stable, here ascending, order). */
+static void
+test_kvdev_mem_list(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	int rc;
+
+	create_test_kvdev("kvl0", 0, 0);
+	rc = spdk_kvdev_open("kvl0", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	/* Insert out of order; List must still visit all of them. */
+	list_store_key(desc, ch, "delta");
+	list_store_key(desc, ch, "alpha");
+	list_store_key(desc, ch, "charlie");
+	list_store_key(desc, ch, "bravo");
+
+	/* List from the beginning (NULL start key). */
+	list_reset(0);
+	rc = spdk_kvdev_list(desc, ch, NULL, 0, list_iter_cb, NULL, list_done_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_completed);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_listed_count == 4);
+	CU_ASSERT(g_list_done_count == 4);
+	/* RB-tree order is ascending by key bytes. */
+	CU_ASSERT(strcmp(g_listed_keys[0], "alpha") == 0);
+	CU_ASSERT(strcmp(g_listed_keys[1], "bravo") == 0);
+	CU_ASSERT(strcmp(g_listed_keys[2], "charlie") == 0);
+	CU_ASSERT(strcmp(g_listed_keys[3], "delta") == 0);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kvl0");
+	CU_ASSERT(rc == 0);
+
+	/* Listing an empty namespace returns zero keys, not an error. */
+	create_test_kvdev("kvl0e", 0, 0);
+	{
+		struct spdk_kvdev_desc *edesc;
+		struct spdk_io_channel *ech;
+
+		rc = spdk_kvdev_open("kvl0e", true, &edesc);
+		CU_ASSERT(rc == 0);
+		ech = spdk_kvdev_get_io_channel(edesc);
+		SPDK_CU_ASSERT_FATAL(ech != NULL);
+
+		list_reset(0);
+		rc = spdk_kvdev_list(edesc, ech, NULL, 0, list_iter_cb, NULL, list_done_cb, NULL);
+		CU_ASSERT(rc == 0);
+		CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+		CU_ASSERT(g_listed_count == 0);
+		CU_ASSERT(g_list_done_count == 0);
+
+		spdk_put_io_channel(ech);
+		spdk_kvdev_close(edesc);
+		poll_threads();
+		rc = kvdev_mem_delete("kvl0e");
+		CU_ASSERT(rc == 0);
+	}
+}
+
+/* A non-NULL start key positions iteration: List resumes from that key (or the
+ * first key sorting at-or-after a key that is absent). */
+static void
+test_kvdev_mem_list_start_key(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	const char start[] = "charlie";
+	const char gap[] = "bb"; /* absent; sorts between "alpha" and "charlie" */
+	int rc;
+
+	create_test_kvdev("kvl1", 0, 0);
+	rc = spdk_kvdev_open("kvl1", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	list_store_key(desc, ch, "alpha");
+	list_store_key(desc, ch, "charlie");
+	list_store_key(desc, ch, "delta");
+
+	/* Start key present: iteration begins AT that key. */
+	list_reset(0);
+	rc = spdk_kvdev_list(desc, ch, start, sizeof(start) - 1, list_iter_cb, NULL,
+			     list_done_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_listed_count == 2);
+	CU_ASSERT(strcmp(g_listed_keys[0], "charlie") == 0);
+	CU_ASSERT(strcmp(g_listed_keys[1], "delta") == 0);
+
+	/* Start key absent: iteration begins at the first key sorting after it
+	 * ("charlie"), a stable vendor-specific start point. */
+	list_reset(0);
+	rc = spdk_kvdev_list(desc, ch, gap, sizeof(gap) - 1, list_iter_cb, NULL,
+			     list_done_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_listed_count == 2);
+	CU_ASSERT(strcmp(g_listed_keys[0], "charlie") == 0);
+	CU_ASSERT(strcmp(g_listed_keys[1], "delta") == 0);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kvl1");
+	CU_ASSERT(rc == 0);
+}
+
+/* When the consumer (host buffer) can only hold so many whole keys, the per-key
+ * callback returns false and iteration stops on a whole-key boundary. */
+static void
+test_kvdev_mem_list_truncate(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	int rc;
+
+	create_test_kvdev("kvl2", 0, 0);
+	rc = spdk_kvdev_open("kvl2", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	list_store_key(desc, ch, "alpha");
+	list_store_key(desc, ch, "bravo");
+	list_store_key(desc, ch, "charlie");
+	list_store_key(desc, ch, "delta");
+
+	/* Buffer only holds 2 whole keys: List must stop after 2 and report 2. */
+	list_reset(2);
+	rc = spdk_kvdev_list(desc, ch, NULL, 0, list_iter_cb, NULL, list_done_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_listed_count == 2);
+	CU_ASSERT(g_list_done_count == 2);
+	CU_ASSERT(strcmp(g_listed_keys[0], "alpha") == 0);
+	CU_ASSERT(strcmp(g_listed_keys[1], "bravo") == 0);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kvl2");
+	CU_ASSERT(rc == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -439,6 +645,9 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_kvdev_mem_store_conditional);
 	CU_ADD_TEST(suite, test_kvdev_mem_delete);
 	CU_ADD_TEST(suite, test_kvdev_mem_exist);
+	CU_ADD_TEST(suite, test_kvdev_mem_list);
+	CU_ADD_TEST(suite, test_kvdev_mem_list_start_key);
+	CU_ADD_TEST(suite, test_kvdev_mem_list_truncate);
 
 	allocate_threads(1);
 	set_thread(0);

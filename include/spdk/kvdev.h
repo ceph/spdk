@@ -69,6 +69,31 @@ enum spdk_kvdev_io_status {
 typedef void (*spdk_kvdev_io_completion_cb)(void *cb_arg, int status, uint32_t value_len);
 
 /**
+ * kvdev List iteration callback. Invoked once per key the backend visits, in
+ * the backend's stable iteration order, until the consumer asks it to stop.
+ *
+ * \param cb_arg Context passed to the originating list op.
+ * \param key Key bytes for this entry (valid only for the duration of the call).
+ * \param key_len Length of \c key in bytes (in [1,16]).
+ *
+ * \return true to continue iterating to the next key, false to stop early (for
+ *         example, when the next key would not fit in the host buffer).
+ */
+typedef bool (*spdk_kvdev_list_cb)(void *cb_arg, const void *key, uint8_t key_len);
+
+/**
+ * kvdev List completion callback. Fired once after iteration finishes (either
+ * the backend ran out of keys or the per-key callback asked it to stop).
+ *
+ * \param cb_arg Context passed to the originating list op.
+ * \param status One of enum spdk_kvdev_io_status (SUCCESS unless the request
+ *               could not be serviced).
+ * \param num_keys Number of keys the per-key callback accepted (i.e. the count
+ *                 for which spdk_kvdev_list_cb returned and the key was emitted).
+ */
+typedef void (*spdk_kvdev_list_done_cb)(void *cb_arg, int status, uint32_t num_keys);
+
+/**
  * Store conditional flags. These mirror the NVMe KV Store command "Store
  * Option" bits (CDW11 bits 8/9 in the SQE) so the NVMf layer can pass the
  * host's intent straight through to the backend.
@@ -203,7 +228,29 @@ struct spdk_kvdev_fn_table {
 	int (*exist)(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 		     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 
-	/* TODO (later slices): list slots in here. */
+	/**
+	 * List (iterate) the keys present in the kvdev.
+	 *
+	 * The backend visits keys in an UNSPECIFIED but STABLE order: the order is
+	 * not defined, but as long as the namespace is not modified (no store/delete)
+	 * two List calls visit keys in the same sequence. \c start_key is a POSITION
+	 * into that stable order: iteration begins at start_key if it is present,
+	 * otherwise at the first key that sorts at-or-after start_key in the backend's
+	 * order (a vendor-specific-but-stable start point per the KV spec §2.1.6.2).
+	 * A NULL/zero-length start_key begins at the very first key.
+	 *
+	 * For each visited key the backend invokes \c iter_cb(iter_arg, key, key_len)
+	 * and stops early as soon as it returns false. When iteration finishes the
+	 * backend invokes \c done_cb(done_arg, status, num_keys) where num_keys is the
+	 * number of keys the iterator callback accepted.
+	 *
+	 * \param ch io_channel obtained from get_io_channel().
+	 * \param start_key Position key, or NULL to start from the beginning.
+	 * \param start_key_len Length of start_key (0 when start_key is NULL).
+	 */
+	int (*list)(struct spdk_io_channel *ch, const void *start_key, uint8_t start_key_len,
+		    spdk_kvdev_list_cb iter_cb, void *iter_arg,
+		    spdk_kvdev_list_done_cb done_cb, void *done_arg);
 };
 
 /**
@@ -378,6 +425,27 @@ int spdk_kvdev_delete(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 int spdk_kvdev_exist(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		     const void *key, uint8_t key_len,
 		     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Submit a List (key iteration) on the descriptor's kvdev. Thin wrapper over
+ * the fn_table.
+ *
+ * Keys are visited in the backend's unspecified-but-stable order; \c start_key
+ * is a position into that order (NULL/0 starts from the beginning). \c iter_cb
+ * is invoked per key and returns false to stop early; \c done_cb fires once at
+ * the end with the accepted key count. See struct spdk_kvdev_fn_table::list.
+ *
+ * \param start_key Position key, or NULL to start from the first key.
+ * \param start_key_len Length of start_key in bytes; must be 0 when start_key
+ *                      is NULL.
+ *
+ * \return 0 if the request was accepted (a completion will fire), negative
+ *         errno if it could not be submitted (no completion fires).
+ */
+int spdk_kvdev_list(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
+		    const void *start_key, uint8_t start_key_len,
+		    spdk_kvdev_list_cb iter_cb, void *iter_arg,
+		    spdk_kvdev_list_done_cb done_cb, void *done_arg);
 
 #ifdef __cplusplus
 }
