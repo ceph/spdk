@@ -67,7 +67,7 @@ test_kvdev_mem_store_retrieve(void)
 
 	/* Store */
 	g_completed = false;
-	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), value, sizeof(value), kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), value, sizeof(value), NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_completed);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
@@ -108,11 +108,11 @@ test_kvdev_mem_overwrite(void)
 	ch = spdk_kvdev_get_io_channel(desc);
 	SPDK_CU_ASSERT_FATAL(ch != NULL);
 
-	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "AAAA", 4, kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "AAAA", 4, NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 
 	/* Overwrite with a different value. */
-	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "BB", 2, kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "BB", 2, NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
 
@@ -177,7 +177,7 @@ test_kvdev_mem_retrieve_truncated(void)
 	ch = spdk_kvdev_get_io_channel(desc);
 	SPDK_CU_ASSERT_FATAL(ch != NULL);
 
-	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), value, sizeof(value), kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), value, sizeof(value), NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
 
@@ -229,19 +229,19 @@ test_kvdev_mem_max_keys(void)
 	ch = spdk_kvdev_get_io_channel(desc);
 	SPDK_CU_ASSERT_FATAL(ch != NULL);
 
-	rc = spdk_kvdev_store(desc, ch, "a", 1, "v", 1, kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, "a", 1, "v", 1, NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
 
 	/* Second distinct key should be rejected for capacity. */
 	g_completed = false;
-	rc = spdk_kvdev_store(desc, ch, "b", 1, "v", 1, kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, "b", 1, "v", 1, NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_NOMEM);
 
 	/* But overwriting the existing key is still allowed. */
 	g_completed = false;
-	rc = spdk_kvdev_store(desc, ch, "a", 1, "w", 1, kv_op_cb, NULL);
+	rc = spdk_kvdev_store(desc, ch, "a", 1, "w", 1, NULL, kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
 
@@ -249,6 +249,74 @@ test_kvdev_mem_max_keys(void)
 	spdk_kvdev_close(desc);
 	poll_threads();
 	rc = kvdev_mem_delete("kv5");
+	CU_ASSERT(rc == 0);
+}
+
+static void
+test_kvdev_mem_store_conditional(void)
+{
+	struct spdk_kvdev_desc *desc;
+	struct spdk_io_channel *ch;
+	struct spdk_kvdev_store_opts opts;
+	const char key[] = "ckey";
+	char buf[16];
+	int rc;
+
+	create_test_kvdev("kv6", 0, 0);
+	rc = spdk_kvdev_open("kv6", true, &desc);
+	CU_ASSERT(rc == 0);
+	ch = spdk_kvdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+
+	/* SIKE (Store-If-Key-Exists) on an absent key must fail KEY_NOT_EXIST. */
+	spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+	opts.flags = SPDK_KVDEV_STORE_FLAG_SIKE;
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "AAAA", 4, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_completed);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
+
+	/* SINKE (Store-If-No-Key-Exists) on an absent key must succeed (creates it). */
+	spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+	opts.flags = SPDK_KVDEV_STORE_FLAG_SINKE;
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "AAAA", 4, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	/* SINKE on a now-existing key must fail KEY_EXIST. */
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "BBBB", 4, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_EXIST);
+
+	/* SIKE on the existing key must now succeed and overwrite. */
+	spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+	opts.flags = SPDK_KVDEV_STORE_FLAG_SIKE;
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "CC", 2, &opts, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	memset(buf, 0, sizeof(buf));
+	g_completed = false;
+	rc = spdk_kvdev_retrieve(desc, ch, key, sizeof(key), buf, sizeof(buf), kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_value_len == 2);
+	CU_ASSERT(memcmp(buf, "CC", 2) == 0);
+
+	/* NULL opts must behave as an unconditional store. */
+	g_completed = false;
+	rc = spdk_kvdev_store(desc, ch, key, sizeof(key), "DDDD", 4, NULL, kv_op_cb, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
+
+	spdk_put_io_channel(ch);
+	spdk_kvdev_close(desc);
+	poll_threads();
+	rc = kvdev_mem_delete("kv6");
 	CU_ASSERT(rc == 0);
 }
 
@@ -267,6 +335,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_kvdev_mem_retrieve_truncated);
 	CU_ADD_TEST(suite, test_kvdev_mem_caps);
 	CU_ADD_TEST(suite, test_kvdev_mem_max_keys);
+	CU_ADD_TEST(suite, test_kvdev_mem_store_conditional);
 
 	allocate_threads(1);
 	set_thread(0);

@@ -19,6 +19,7 @@
 #define SPDK_KVDEV_H
 
 #include "spdk/stdinc.h"
+#include "spdk/assert.h"
 #include "spdk/queue.h"
 #include "spdk/uuid.h"
 
@@ -46,6 +47,8 @@ enum spdk_kvdev_io_status {
 	SPDK_KVDEV_IO_STATUS_FAILED		= -1,
 	/** The requested key does not exist. */
 	SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST	= -2,
+	/** The key already exists (e.g. a Store-If-No-Key-Exists conflict). */
+	SPDK_KVDEV_IO_STATUS_KEY_EXIST		= -6,
 	/** The provided buffer was too small to hold the value. */
 	SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL	= -3,
 	/** The request was malformed (bad key length, etc.). */
@@ -64,6 +67,64 @@ enum spdk_kvdev_io_status {
  *                  store.
  */
 typedef void (*spdk_kvdev_io_completion_cb)(void *cb_arg, int status, uint32_t value_len);
+
+/**
+ * Store conditional flags. These mirror the NVMe KV Store command "Store
+ * Option" bits (CDW11 bits 8/9 in the SQE) so the NVMf layer can pass the
+ * host's intent straight through to the backend.
+ */
+enum spdk_kvdev_store_flags {
+	/** Default behaviour: insert or overwrite unconditionally. */
+	SPDK_KVDEV_STORE_FLAG_NONE	= 0,
+	/**
+	 * Store-If-Key-Exists (SIKE). Only store when the key already exists;
+	 * otherwise fail with SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST.
+	 */
+	SPDK_KVDEV_STORE_FLAG_SIKE	= 1u << 0,
+	/**
+	 * Store-If-No-Key-Exists (SINKE). Only store when the key does not yet
+	 * exist; otherwise fail with SPDK_KVDEV_IO_STATUS_KEY_EXIST.
+	 */
+	SPDK_KVDEV_STORE_FLAG_SINKE	= 1u << 1,
+};
+
+/**
+ * Extensible options for a Store operation.
+ *
+ * The struct is versioned by its leading \c size field: callers set \c size to
+ * sizeof(struct spdk_kvdev_store_opts) and backends must only read fields that
+ * fall within the supplied size. This lets later slices append members (e.g. a
+ * TTL for slice 5) without breaking the store ABI. Always populate via
+ * spdk_kvdev_store_opts_init() before setting fields.
+ */
+struct spdk_kvdev_store_opts {
+	/** Size of this structure as known to the caller. Must be set first. */
+	size_t		size;
+	/** Bitmask of enum spdk_kvdev_store_flags. */
+	uint32_t	flags;
+
+	/*
+	 * Future slices APPEND fields below this line (never reorder/remove
+	 * existing ones); the \c size field handles versioning. The slot
+	 * reserved next is a CDW12 TTL for slice 5:
+	 *   uint32_t ttl;
+	 * For now an explicit reserved word keeps the struct's footprint stable
+	 * so adding the TTL later is a pure value change, not an ABI break.
+	 */
+	uint32_t	reserved;
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_kvdev_store_opts) == 16, "Incorrect size");
+
+/**
+ * Initialize a store options struct to defaults. \c size is typically
+ * sizeof(struct spdk_kvdev_store_opts).
+ */
+static inline void
+spdk_kvdev_store_opts_init(struct spdk_kvdev_store_opts *opts, size_t size)
+{
+	memset(opts, 0, size);
+	opts->size = size;
+}
 
 /**
  * Advertised capabilities/limits of a kvdev. Used by the NVMf layer to build
@@ -102,9 +163,13 @@ struct spdk_kvdev_fn_table {
 	 * \param ch io_channel obtained from get_io_channel().
 	 * \param key Key bytes (key_len in [1,16]).
 	 * \param value Value bytes to store (value_len bytes).
+	 * \param opts Store options (flags such as SIKE/SINKE, future TTL). May be
+	 *             NULL for default (unconditional) behaviour. The backend must
+	 *             honour opts->size and ignore fields beyond it.
 	 */
 	int (*store)(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 		     const void *value, uint32_t value_len,
+		     const struct spdk_kvdev_store_opts *opts,
 		     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 
 	/**
@@ -253,11 +318,15 @@ const struct spdk_kvdev_caps *spdk_kvdev_get_caps(const struct spdk_kvdev *kvdev
 struct spdk_io_channel *spdk_kvdev_get_io_channel(struct spdk_kvdev_desc *desc);
 
 /**
- * Submit a Store on the descriptor's kvdev. Thin wrappers over the fn_table.
+ * Submit a Store on the descriptor's kvdev. Thin wrapper over the fn_table.
+ *
+ * \param opts Store options (SIKE/SINKE flags, future TTL). May be NULL for
+ *             default (unconditional insert-or-overwrite) behaviour.
  */
 int spdk_kvdev_store(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		     const void *key, uint8_t key_len,
 		     const void *value, uint32_t value_len,
+		     const struct spdk_kvdev_store_opts *opts,
 		     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
 
 /**
