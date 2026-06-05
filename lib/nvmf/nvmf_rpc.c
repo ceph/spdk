@@ -191,11 +191,18 @@ dump_nvmf_subsystem(struct spdk_json_write_ctx *w, struct spdk_nvmf_subsystem *s
 			spdk_nvmf_ns_get_opts(ns, &ns_opts, sizeof(ns_opts));
 			spdk_json_write_object_begin(w);
 			spdk_json_write_named_int32(w, "nsid", spdk_nvmf_ns_get_id(ns));
-			spdk_json_write_named_string(w, "bdev_name",
-						     spdk_bdev_get_name(spdk_nvmf_ns_get_bdev(ns)));
-			/* NOTE: "name" is kept for compatibility only - new code should use bdev_name. */
-			spdk_json_write_named_string(w, "name",
-						     spdk_bdev_get_name(spdk_nvmf_ns_get_bdev(ns)));
+			if (ns->kvdev != NULL) {
+				/* Key-Value namespace: no bdev. Report the backing kvdev
+				 * instead of dereferencing a NULL bdev. */
+				spdk_json_write_named_string(w, "kvdev_name",
+							     spdk_kvdev_get_name(ns->kvdev));
+			} else {
+				spdk_json_write_named_string(w, "bdev_name",
+							     spdk_bdev_get_name(spdk_nvmf_ns_get_bdev(ns)));
+				/* NOTE: "name" is kept for compatibility only - new code should use bdev_name. */
+				spdk_json_write_named_string(w, "name",
+							     spdk_bdev_get_name(spdk_nvmf_ns_get_bdev(ns)));
+			}
 
 			if (!spdk_mem_all_zero(ns_opts.nguid, sizeof(ns_opts.nguid))) {
 				spdk_json_write_named_bytearray(w, "nguid", ns_opts.nguid, sizeof(ns_opts.nguid));

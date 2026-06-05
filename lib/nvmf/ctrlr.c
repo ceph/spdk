@@ -3962,6 +3962,12 @@ nvmf_ctrlr_identify_iocs(struct spdk_nvmf_ctrlr *ctrlr,
 	vector->nvm = 1;
 	for (ns = spdk_nvmf_subsystem_get_first_ns(ctrlr->subsys); ns != NULL;
 	     ns = spdk_nvmf_subsystem_get_next_ns(ctrlr->subsys, ns)) {
+		if (ns->csi == SPDK_NVME_CSI_KV) {
+			/* Key-Value namespaces have no bdev; advertise the KV command
+			 * set so spec-conformant hosts enable it (matches CAP.CSS). */
+			vector->kv = 1;
+			continue;
+		}
 		if (ns->bdev == NULL) {
 			continue;
 		}

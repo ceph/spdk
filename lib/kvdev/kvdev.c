@@ -226,6 +226,7 @@ int
 spdk_kvdev_store(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		 const void *key, uint8_t key_len,
 		 const void *value, uint32_t value_len,
+		 const struct spdk_kvdev_store_opts *opts,
 		 spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
 {
 	struct spdk_kvdev *kvdev = desc->kvdev;
@@ -234,7 +235,7 @@ spdk_kvdev_store(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		return -EINVAL;
 	}
 
-	return kvdev->fn_table->store(ch, key, key_len, value, value_len, cb_fn, cb_arg);
+	return kvdev->fn_table->store(ch, key, key_len, value, value_len, opts, cb_fn, cb_arg);
 }
 
 int
