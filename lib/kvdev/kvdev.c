@@ -315,6 +315,7 @@ spdk_kvdev_list(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 int
 spdk_kvdev_exec(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		const void *key, uint8_t key_len, uint32_t op_id,
+		const char *binding,
 		const void *input, uint32_t input_len,
 		void *output_buf, uint32_t output_buf_len,
 		spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
@@ -332,7 +333,7 @@ spdk_kvdev_exec(struct spdk_kvdev_desc *desc, struct spdk_io_channel *ch,
 		return -ENOTSUP;
 	}
 
-	return kvdev->fn_table->exec(ch, key, key_len, op_id, input, input_len,
+	return kvdev->fn_table->exec(ch, key, key_len, op_id, binding, input, input_len,
 				     output_buf, output_buf_len, cb_fn, cb_arg);
 }
 

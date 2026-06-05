@@ -737,7 +737,7 @@ test_kvdev_mem_exec_echo(void)
 
 	memset(out, 0, sizeof(out));
 	g_completed = false;
-	rc = spdk_kvdev_exec(desc, ch, "k", 1, KVDEV_MEM_EXEC_OP_ECHO,
+	rc = spdk_kvdev_exec(desc, ch, "k", 1, KVDEV_MEM_EXEC_OP_ECHO, NULL,
 			     input, sizeof(input), out, sizeof(out), kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_completed);
@@ -775,7 +775,7 @@ test_kvdev_mem_exec_append(void)
 	/* APPEND on an absent key must fail KEY_NOT_EXIST. */
 	memset(out, 0, sizeof(out));
 	g_completed = false;
-	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_APPEND,
+	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_APPEND, NULL,
 			     "X", 1, out, sizeof(out), kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST);
@@ -787,7 +787,7 @@ test_kvdev_mem_exec_append(void)
 
 	memset(out, 0, sizeof(out));
 	g_completed = false;
-	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_APPEND,
+	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_APPEND, NULL,
 			     "BB", 2, out, sizeof(out), kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_SUCCESS);
@@ -805,7 +805,7 @@ test_kvdev_mem_exec_append(void)
 
 	/* An unknown op-ID must be rejected INVALID (no allowlist yet). */
 	g_completed = false;
-	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), 999,
+	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), 999, NULL,
 			     "Z", 1, out, sizeof(out), kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_INVALID);
@@ -841,7 +841,7 @@ test_kvdev_mem_exec_truncate(void)
 	/* ECHO a 10-byte input into a 4-byte buffer: truncated, true len 10. */
 	memset(out, 0, sizeof(out));
 	g_completed = false;
-	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_ECHO,
+	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_ECHO, NULL,
 			     input, 10, out, sizeof(out), kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL);
@@ -856,7 +856,7 @@ test_kvdev_mem_exec_truncate(void)
 
 	memset(out, 0, sizeof(out));
 	g_completed = false;
-	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_APPEND,
+	rc = spdk_kvdev_exec(desc, ch, key, sizeof(key), KVDEV_MEM_EXEC_OP_APPEND, NULL,
 			     "012345", 6, out, sizeof(out), kv_op_cb, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_status == SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL);
