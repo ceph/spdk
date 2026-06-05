@@ -98,6 +98,15 @@ struct kvdev_rados_io {
 	size_t				bytes_read;	/* RETRIEVE: read_op_read out */
 	int				read_rval;	/* RETRIEVE: read_op_read rc */
 	uint32_t			buf_len;	/* RETRIEVE/EXEC: caller buf size */
+	/* EXEC only: the host's output buffer plus the librados-ALLOCATED output
+	 * buffer and its length. rados_read_op_exec allocates exec_out to the cls's
+	 * true output length (exec_out_len) — there is no caller buffer to over-run;
+	 * io_finish copies min(true_len, buf_len) of it into host_out and frees
+	 * exec_out with rados_buffer_free. */
+	void				*host_out;	/* EXEC: caller's output buffer */
+	char				*exec_out;	/* EXEC: librados-allocated output buf */
+	size_t				exec_out_len;	/* EXEC: librados-allocated out length */
+	int				exec_rval;	/* EXEC: read_op_exec sub-op rc */
 	spdk_kvdev_io_completion_cb	cb_fn;
 	void				*cb_arg;
 	TAILQ_ENTRY(kvdev_rados_io)	link;
@@ -554,22 +563,46 @@ kvdev_rados_io_finish(struct kvdev_rados_io *io)
 		}
 	} else if (io->op == KVDEV_RADOS_OP_EXIST && ret >= 0) {
 		status = SPDK_KVDEV_IO_STATUS_SUCCESS;
-	} else if (io->op == KVDEV_RADOS_OP_EXEC && ret >= 0) {
+	} else if (io->op == KVDEV_RADOS_OP_EXEC) {
 		/*
-		 * rados_aio_exec returns the number of output bytes the cls method
-		 * produced and copied into the caller buffer. Unlike Retrieve (which
-		 * pairs a stat sub-op to learn the TRUE length), rados gives no way to
-		 * recover the full output length when the cls output exceeds the host
-		 * buffer: librados copies at most out_len bytes and the return value is
-		 * that copied count. So we report the bytes returned as value_len and
-		 * flag BUFFER_TOO_SMALL only when the output exactly filled the buffer
-		 * (a possible truncation). The host's buffer should be sized to the
-		 * advertised op output; this is the documented rados-backend contract. */
-		value_len = (uint32_t)ret;
-		if ((uint32_t)ret >= io->buf_len && io->buf_len > 0) {
-			status = SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL;
-		} else {
-			status = SPDK_KVDEV_IO_STATUS_SUCCESS;
+		 * KV Exec runs via a rados read_op carrying rados_read_op_exec: ret is
+		 * the operate() return and io->exec_rval is the cls method's own return
+		 * code. librados ALLOCATES io->exec_out and sets io->exec_out_len to the
+		 * cls's TRUE output length — there is NO caller buffer to over-run, so
+		 * the old fixed-internal-buffer overflow is structurally impossible. We:
+		 *   - take true_len = io->exec_out_len (the real output length),
+		 *   - copy min(true_len, host buf_len) of exec_out into the host buffer,
+		 *   - report true_len (bounded by the value-size cap, like Retrieve) so
+		 *     the host can detect truncation and resize, and
+		 *   - flag BUFFER_TOO_SMALL ONLY when true_len > host buf_len.
+		 * This matches Retrieve's true-length semantics and the in-memory module
+		 * exactly: an EXACT-FIT output (true_len == buf_len) reports SUCCESS with
+		 * the correct length, not a spurious BUFFER_TOO_SMALL. exec_out is freed
+		 * unconditionally below with rados_buffer_free. */
+		status = kvdev_rados_xlate_status(io->op, ret);
+		if (ret >= 0 && io->exec_rval >= 0) {
+			uint64_t true_len = io->exec_out_len;
+			uint32_t copy_len;
+
+			value_len = (uint32_t)spdk_min(true_len, KVDEV_RADOS_MAX_VALUE_LEN);
+			copy_len = (uint32_t)spdk_min(true_len, (uint64_t)io->buf_len);
+			if (copy_len > 0 && io->host_out != NULL &&
+			    io->exec_out != NULL) {
+				memcpy(io->host_out, io->exec_out, copy_len);
+			}
+			if (true_len > io->buf_len) {
+				status = SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL;
+			} else {
+				status = SPDK_KVDEV_IO_STATUS_SUCCESS;
+			}
+			SPDK_INFOLOG(kvdev_rados,
+				     "KV Exec: true_len=%" PRIu64 " host_buf_len=%u -> %s\n",
+				     true_len, io->buf_len,
+				     status == SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL ?
+				     "BUFFER_TOO_SMALL" : "SUCCESS");
+		} else if (ret >= 0) {
+			/* operate() succeeded but the cls method itself failed. */
+			status = kvdev_rados_xlate_status(io->op, io->exec_rval);
 		}
 	}
 
@@ -581,6 +614,11 @@ kvdev_rados_io_finish(struct kvdev_rados_io *io)
 	}
 	if (io->read_op) {
 		rados_release_read_op(io->read_op);
+	}
+	/* exec_out is librados-allocated (rados_read_op_exec); free it on every
+	 * path with rados_buffer_free, never plain free(). NULL is a safe no-op. */
+	if (io->exec_out) {
+		rados_buffer_free(io->exec_out);
 	}
 	free(io);
 }
@@ -846,10 +884,15 @@ kvdev_rados_exist(struct spdk_io_channel *_ch, const void *key, uint8_t key_len,
  * rejected INVALID before any rados call. op_id itself is not interpreted here
  * (it only selected the binding upstream).
  *
- * The cls runs server-side on the OSD owning oid = hex(key) via rados_aio_exec;
- * the harvest/poller pattern is identical to the other ops (we never touch SPDK
- * state from a librados thread). The method's output is bounded by the host
- * buffer (output_buf_len); see kvdev_rados_io_finish for the truncation contract.
+ * The cls runs server-side on the OSD owning oid = hex(key) via a rados read_op
+ * carrying rados_read_op_exec, dispatched async with rados_aio_read_op_operate
+ * (the same harvest/poller pattern as Retrieve — we never touch SPDK state from
+ * a librados thread). librados ALLOCATES the cls output buffer to its TRUE
+ * length (io->exec_out / io->exec_out_len); there is no caller buffer for
+ * librados to over-run. kvdev_rados_io_finish then reports the true length,
+ * copies back at most output_buf_len bytes, flags BUFFER_TOO_SMALL only on a
+ * genuine over-flow (true_len > host len), and frees the librados buffer with
+ * rados_buffer_free — see kvdev_rados_io_finish for the length/status contract.
  */
 static int
 kvdev_rados_exec(struct spdk_io_channel *_ch, const void *key, uint8_t key_len,
@@ -895,18 +938,32 @@ kvdev_rados_exec(struct spdk_io_channel *_ch, const void *key, uint8_t key_len,
 		return 0;
 	}
 	io->buf_len = output_buf_len;
+	io->host_out = output_buf;
 
 	/*
-	 * rados_aio_exec runs cls::method on the OSD owning oid, feeding it the
-	 * input blob and copying up to output_buf_len bytes of its output into
-	 * output_buf. The completion return value carries the output byte count
-	 * (or a negative errno: -ENOENT object missing -> KEY_NOT_EXIST,
-	 * -EOPNOTSUPP unknown class/method -> NOT_SUPPORTED; see xlate_status).
+	 * Build a read_op carrying rados_read_op_exec. librados ALLOCATES the cls
+	 * output buffer to its true length (io->exec_out, io->exec_out_len) and the
+	 * cls method's own return code lands in io->exec_rval — there is no caller
+	 * buffer for librados to over-run, so a >cap cls output cannot corrupt any
+	 * of our memory. io_finish copies back min(true_len, output_buf_len),
+	 * reports the true length, and frees io->exec_out with rados_buffer_free.
+	 * Dispatched async via rados_aio_read_op_operate, exactly like Retrieve.
 	 */
-	rc = rados_aio_exec(rdev->io_ctx, oid, io->comp, cls, method,
-			    (const char *)input, input_len,
-			    (char *)output_buf, output_buf_len);
+	io->read_op = rados_create_read_op();
+	if (io->read_op == NULL) {
+		rados_aio_release(io->comp);
+		free(io);
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_NOMEM, 0);
+		return 0;
+	}
+
+	rados_read_op_exec(io->read_op, cls, method,
+			   (const char *)input, input_len,
+			   &io->exec_out, &io->exec_out_len, &io->exec_rval);
+
+	rc = rados_aio_read_op_operate(io->read_op, rdev->io_ctx, io->comp, oid, 0);
 	if (rc < 0) {
+		rados_release_read_op(io->read_op);
 		rados_aio_release(io->comp);
 		free(io);
 		cb_fn(cb_arg, kvdev_rados_xlate_status(KVDEV_RADOS_OP_EXEC, rc), 0);

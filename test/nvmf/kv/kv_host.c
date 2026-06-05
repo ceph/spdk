@@ -50,6 +50,9 @@ struct kv_ctx {
 	/* Status code (sct/sc) of the most recently completed command. */
 	volatile uint8_t	last_sct;
 	volatile uint8_t	last_sc;
+	/* cdw0 of the most recently completed command. For KV Exec this is the
+	 * TRUE output length the backend reported (value_len). */
+	volatile uint32_t	last_cdw0;
 };
 
 static bool
@@ -75,6 +78,7 @@ io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 
 	ctx->last_sct = cpl->status.sct;
 	ctx->last_sc = cpl->status.sc;
+	ctx->last_cdw0 = cpl->cdw0;
 
 	if (spdk_nvme_cpl_is_error(cpl)) {
 		fprintf(stderr, "KV command failed: sct=%d sc=%d\n",
@@ -337,6 +341,185 @@ main(int argc, char **argv)
 			goto free_qpair;
 		}
 		fprintf(stderr, "KV Exec rados UPCASE OK: OSD cls returned '%s'\n", exec_buf);
+
+		/*
+		 * EXACT-FIT length check (the core of the BUFFER_TOO_SMALL fix). op_id 3
+		 * == kvtest:fixedout returns EXACTLY N bytes where N is the LE uint32 in
+		 * the first 4 input bytes. We ask for N == the host output buffer length,
+		 * so the cls output exactly fills the buffer with NO truncation. Before
+		 * the fix this spuriously reported BUFFER_TOO_SMALL; it must now be
+		 * SUCCESS (sc=0x00) with cdw0 == the buffer length (the true output len),
+		 * and the buffer must hold the deterministic 'A'+(i%26) pattern in full.
+		 */
+		{
+			const uint32_t exact_n = buf_len;       /* fill the buffer exactly */
+			uint32_t hdr;
+			uint32_t i;
+
+			hdr = exact_n;
+			memset(exec_buf, 0, buf_len);
+			memcpy(exec_buf, &hdr, sizeof(hdr));    /* LE uint32 length header */
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       3 /* kvtest:fixedout */, exec_buf, sizeof(hdr),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0 ||
+			    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+				fprintf(stderr, "KV Exec rados fixedout(exact-fit) failed\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+				fprintf(stderr, "FAIL: exact-fit exec sc=0x%02x, expected 0x00\n",
+					ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_cdw0 != exact_n) {
+				fprintf(stderr,
+					"FAIL: exact-fit exec cdw0=%u, expected %u (true length)\n",
+					ctx.last_cdw0, exact_n);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			for (i = 0; i < exact_n; i++) {
+				if ((unsigned char)exec_buf[i] != (unsigned char)('A' + (i % 26))) {
+					fprintf(stderr,
+						"FAIL: exact-fit exec byte %u = 0x%02x, expected 0x%02x\n",
+						i, (unsigned char)exec_buf[i],
+						(unsigned char)('A' + (i % 26)));
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec rados EXACT-FIT OK: sc=0x00 cdw0=%u (== buf_len %u), "
+				"full output present, NO spurious BUFFER_TOO_SMALL\n",
+				ctx.last_cdw0, buf_len);
+		}
+
+		/*
+		 * OVER-LARGE (genuine truncation) check. Ask fixedout for MORE bytes than
+		 * the host buffer holds. The command still completes sc=0x00 (the NVMe KV
+		 * BUFFER_TOO_SMALL contract maps to success+CQE length), but cdw0 must now
+		 * carry the TRUE output length (> buf_len), and the first buf_len bytes
+		 * must be present. This proves over-large output is NOT silently reported
+		 * as exact and the host can detect it needs a bigger buffer.
+		 */
+		{
+			const uint32_t big_n = buf_len + 144;   /* genuinely larger than buf */
+			uint32_t hdr;
+			uint32_t i;
+
+			hdr = big_n;
+			memset(exec_buf, 0, buf_len);
+			memcpy(exec_buf, &hdr, sizeof(hdr));
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       3 /* kvtest:fixedout */, exec_buf, sizeof(hdr),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0 ||
+			    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+				fprintf(stderr, "KV Exec rados fixedout(over-large) failed\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+				fprintf(stderr, "FAIL: over-large exec sc=0x%02x, expected 0x00\n",
+					ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_cdw0 != big_n) {
+				fprintf(stderr,
+					"FAIL: over-large exec cdw0=%u, expected %u (TRUE length > buf)\n",
+					ctx.last_cdw0, big_n);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			for (i = 0; i < buf_len; i++) {
+				if ((unsigned char)exec_buf[i] != (unsigned char)('A' + (i % 26))) {
+					fprintf(stderr,
+						"FAIL: over-large exec byte %u = 0x%02x, expected 0x%02x\n",
+						i, (unsigned char)exec_buf[i],
+						(unsigned char)('A' + (i % 26)));
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec rados OVER-LARGE OK: sc=0x00 cdw0=%u (TRUE length > buf_len %u), "
+				"first %u bytes present (genuine BUFFER_TOO_SMALL)\n",
+				ctx.last_cdw0, buf_len, buf_len);
+		}
+
+		/*
+		 * >1 MiB (over-cap) regression check for the heap-buffer-overflow fix.
+		 * The OLD backend handed librados a fixed 1 MiB internal buffer; a cls
+		 * emitting more than that over-ran it (ASan: heap-buffer-overflow WRITE
+		 * 1052672 into 1048576-byte alloc). The fix uses rados_read_op_exec, so
+		 * librados ALLOCATES the output buffer to the TRUE length — no fixed
+		 * buffer to over-run. Ask fixedout for 2 MiB while the host buffer stays
+		 * tiny (buf_len): the command must still complete sc=0x00, cdw0 must
+		 * carry the full TRUE length (2 MiB, well past the old 1 MiB threshold),
+		 * the first buf_len bytes must hold the deterministic pattern, and ASan
+		 * must report ZERO overflow. This is the core acceptance case.
+		 */
+		{
+			const uint32_t huge_n = 2u * 1024u * 1024u; /* 2 MiB, > old 1 MiB cap */
+			uint32_t hdr;
+			uint32_t i;
+
+			hdr = huge_n;
+			memset(exec_buf, 0, buf_len);
+			memcpy(exec_buf, &hdr, sizeof(hdr));
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       3 /* kvtest:fixedout */, exec_buf, sizeof(hdr),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0 ||
+			    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+				fprintf(stderr, "KV Exec rados fixedout(>1MiB) failed\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+				fprintf(stderr, "FAIL: >1MiB exec sc=0x%02x, expected 0x00\n",
+					ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_cdw0 != huge_n) {
+				fprintf(stderr,
+					"FAIL: >1MiB exec cdw0=%u, expected %u (TRUE length, >1MiB)\n",
+					ctx.last_cdw0, huge_n);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			for (i = 0; i < buf_len; i++) {
+				if ((unsigned char)exec_buf[i] != (unsigned char)('A' + (i % 26))) {
+					fprintf(stderr,
+						"FAIL: >1MiB exec byte %u = 0x%02x, expected 0x%02x\n",
+						i, (unsigned char)exec_buf[i],
+						(unsigned char)('A' + (i % 26)));
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec rados >1MiB OK: sc=0x00 cdw0=%u (TRUE 2MiB output), "
+				"first %u bytes correct, NO overflow (librados-sized buffer)\n",
+				ctx.last_cdw0, buf_len);
+		}
 
 		spdk_dma_free(exec_buf);
 		fprintf(stderr, "PASS: KV Exec rados e2e (OSD-side kvtest cls ran)\n");
