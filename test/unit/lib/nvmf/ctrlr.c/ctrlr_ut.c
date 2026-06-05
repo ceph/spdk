@@ -43,6 +43,16 @@ DEFINE_STUB(spdk_nvmf_tgt_find_subsystem,
 	    (struct spdk_nvmf_tgt *tgt, const char *subnqn),
 	    NULL);
 
+DEFINE_STUB(spdk_kvdev_get_caps, const struct spdk_kvdev_caps *,
+	    (const struct spdk_kvdev *kvdev), NULL);
+DEFINE_STUB_V(nvmf_kvdev_ctrlr_identify_ns,
+	      (struct spdk_nvmf_ns *ns, struct spdk_nvme_kv_ns_data *nsdata));
+DEFINE_STUB_V(nvmf_kvdev_ctrlr_identify_ctrlr,
+	      (struct spdk_nvmf_ctrlr *ctrlr, struct spdk_nvme_kv_ctrlr_data *cdata));
+DEFINE_STUB(nvmf_kvdev_ctrlr_process_io_cmd, int,
+	    (struct spdk_nvmf_ns *ns, struct spdk_io_channel *ch, struct spdk_nvmf_request *req),
+	    SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
+
 DEFINE_STUB(spdk_nvmf_poll_group_create,
 	    struct spdk_nvmf_poll_group *,
 	    (struct spdk_nvmf_tgt *tgt),

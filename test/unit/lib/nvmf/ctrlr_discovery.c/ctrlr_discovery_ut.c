@@ -19,6 +19,12 @@ SPDK_LOG_REGISTER_COMPONENT(nvmf)
 DEFINE_STUB_V(spdk_bdev_module_release_bdev,
 	      (struct spdk_bdev *bdev));
 
+DEFINE_STUB(spdk_kvdev_open, int,
+	    (const char *name, bool write, struct spdk_kvdev_desc **desc), -ENODEV);
+DEFINE_STUB_V(spdk_kvdev_close, (struct spdk_kvdev_desc *desc));
+DEFINE_STUB(spdk_kvdev_desc_get_kvdev, struct spdk_kvdev *,
+	    (struct spdk_kvdev_desc *desc), NULL);
+
 DEFINE_STUB(spdk_bdev_get_block_size, uint32_t,
 	    (const struct spdk_bdev *bdev), 512);
 
