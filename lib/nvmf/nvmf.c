@@ -719,11 +719,52 @@ spdk_nvmf_get_next_tgt(struct spdk_nvmf_tgt *prev)
 }
 
 static void
+nvmf_write_subsystem_add_kv_ns_config(struct spdk_json_write_ctx *w,
+				      struct spdk_nvmf_subsystem *subsystem,
+				      struct spdk_nvmf_ns *ns)
+{
+	struct spdk_nvmf_ns_opts ns_opts;
+
+	spdk_nvmf_ns_get_opts(ns, &ns_opts, sizeof(ns_opts));
+
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "method", "nvmf_subsystem_add_kv_ns");
+
+	/*     "params" : { */
+	spdk_json_write_named_object_begin(w, "params");
+
+	spdk_json_write_named_string(w, "nqn", spdk_nvmf_subsystem_get_nqn(subsystem));
+	spdk_json_write_named_string(w, "kvdev_name", spdk_kvdev_get_name(ns->kvdev));
+	spdk_json_write_named_uint32(w, "nsid", spdk_nvmf_ns_get_id(ns));
+
+	if (!spdk_uuid_is_null(&ns_opts.uuid)) {
+		spdk_json_write_named_uuid(w, "uuid", &ns_opts.uuid);
+	}
+
+	if (subsystem->opts.ana_reporting) {
+		spdk_json_write_named_uint32(w, "anagrpid", ns_opts.anagrpid);
+	}
+
+	/*     } "params" */
+	spdk_json_write_object_end(w);
+
+	/* } */
+	spdk_json_write_object_end(w);
+}
+
+static void
 nvmf_write_subsystem_add_ns_config(struct spdk_json_write_ctx *w,
 				   struct spdk_nvmf_subsystem *subsystem,
 				   struct spdk_nvmf_ns *ns)
 {
 	struct spdk_nvmf_ns_opts ns_opts;
+
+	/* Key-Value namespaces have no bdev; emit a dedicated add_kv_ns RPC so the
+	 * saved config can recreate them (and never dereference a NULL bdev). */
+	if (ns->kvdev != NULL) {
+		nvmf_write_subsystem_add_kv_ns_config(w, subsystem, ns);
+		return;
+	}
 
 	spdk_nvmf_ns_get_opts(ns, &ns_opts, sizeof(ns_opts));
 
@@ -1849,6 +1890,11 @@ poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
 					return -ENOMEM;
 				}
 				ns_info->channel = ch;
+			}
+			/* An ANA group change on a KV namespace must still raise an AEN,
+			 * so detect it here before updating the cached anagrpid. */
+			if (ns_info->anagrpid != ns->anagrpid) {
+				ana_changed = true;
 			}
 			ns_info->anagrpid = ns->anagrpid;
 			continue;

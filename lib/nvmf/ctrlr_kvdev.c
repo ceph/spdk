@@ -30,6 +30,9 @@ struct nvmf_kvdev_request {
 	struct spdk_nvmf_request	*req;
 	/* Bounce buffer used when the request payload spans multiple iovs. */
 	void				*bounce;
+	/* Host buffer size from CDW10 (bytes the host actually offered). The
+	 * bounce buffer is only valid up to this many bytes. */
+	uint32_t			xfer_len;
 };
 
 void
@@ -93,6 +96,9 @@ nvmf_kvdev_complete(struct nvmf_kvdev_request *kv_req, int kvstatus, uint32_t va
 	case SPDK_KVDEV_IO_STATUS_KEY_NOT_EXIST:
 		rsp->status.sc = SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST;
 		break;
+	case SPDK_KVDEV_IO_STATUS_KEY_EXIST:
+		rsp->status.sc = SPDK_NVME_SC_KEY_EXISTS;
+		break;
 	case SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL:
 		/* Spec: device returns requested portion and reports the full
 		 * value length in the CQE; the command itself succeeds. */
@@ -129,12 +135,15 @@ nvmf_kvdev_retrieve_done(void *cb_arg, int status, uint32_t value_len)
 	struct spdk_nvmf_request *req = kv_req->req;
 
 	/* If the payload spanned multiple iovs we retrieved into a bounce
-	 * buffer; scatter it back out to the request iovs. */
+	 * buffer; scatter it back out to the request iovs. Only copy bytes the
+	 * kvdev actually wrote (bounded by the host buffer size from CDW10), not
+	 * req->length, so a host that advertises an SGL larger than CDW10 cannot
+	 * read back uninitialized bounce-buffer bytes. */
 	if (kv_req->bounce != NULL &&
 	    (status == SPDK_KVDEV_IO_STATUS_SUCCESS ||
 	     status == SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL)) {
 		spdk_copy_buf_to_iovs(req->iov, req->iovcnt, kv_req->bounce,
-				      spdk_min(value_len, req->length));
+				      spdk_min(value_len, kv_req->xfer_len));
 	}
 
 	nvmf_kvdev_complete(kv_req, status, value_len);
@@ -206,16 +215,31 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		rsp->status.sc = SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
+	kv_req->xfer_len = xfer_len;
 
 	switch (cmd->opc) {
-	case SPDK_NVME_OPC_KV_STORE:
+	case SPDK_NVME_OPC_KV_STORE: {
+		struct spdk_kvdev_store_opts opts;
+
+		spdk_kvdev_store_opts_init(&opts, sizeof(opts));
+		/* Store Option bits live in CDW11 Request Options (ro): bit 0 maps to
+		 * Store-If-No-Key-Exists, bit 1 to Store-If-Key-Exists, per the KV
+		 * Command Set spec. (CDW11 bit 8 == ro bit 0, bit 9 == ro bit 1.) */
+		if (cmd->cdw11_bits.kv.ro & SPDK_NVME_KV_STORE_OPT_DONT_STORE_IF_KEY_NOT_EXISTS) {
+			opts.flags |= SPDK_KVDEV_STORE_FLAG_SIKE;
+		}
+		if (cmd->cdw11_bits.kv.ro & SPDK_NVME_KV_STORE_OPT_DONT_STORE_IF_KEY_EXISTS) {
+			opts.flags |= SPDK_KVDEV_STORE_FLAG_SINKE;
+		}
+
 		data = nvmf_kvdev_get_contig_buf(req, true, kv_req);
 		if (data == NULL) {
 			goto err_nomem;
 		}
 		rc = spdk_kvdev_store(ns->kvdev_desc, ch, key, key_len, data, xfer_len,
-				      nvmf_kvdev_store_done, kv_req);
+				      &opts, nvmf_kvdev_store_done, kv_req);
 		break;
+	}
 	case SPDK_NVME_OPC_KV_RETRIEVE:
 		data = nvmf_kvdev_get_contig_buf(req, false, kv_req);
 		if (data == NULL) {

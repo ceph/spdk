@@ -45,6 +45,7 @@ doc/jsonrpc.md
 test_completions.txt
 timing.txt
 test/common/build_config.sh
+test/nvmf/kv/kv_host
 scripts/pkgdep/requirements.txt
 .coredump_path
 .run_test_name
