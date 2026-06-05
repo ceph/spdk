@@ -77,3 +77,53 @@ cleanup:
 	free_rpc_kvdev_mem_delete(&req);
 }
 SPDK_RPC_REGISTER("kvdev_mem_delete", rpc_kvdev_mem_delete, SPDK_RPC_RUNTIME)
+
+/*
+ * Debug/diagnostic RPC: inspect a stored entry, notably the store-only vendor
+ * TTL (ADR-0003), so end-to-end tests can assert the TTL round-trips into the
+ * backend. The key is passed as a UTF-8/ASCII string (1-16 bytes).
+ */
+
+static void
+rpc_kvdev_mem_get_entry(struct spdk_jsonrpc_request *request,
+			const struct spdk_json_val *params)
+{
+	struct rpc_kvdev_mem_get_entry_ctx req = {};
+	struct kvdev_mem_entry_info info = {};
+	struct spdk_json_write_ctx *w;
+	size_t key_len;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_kvdev_mem_get_entry_decoders,
+				    SPDK_COUNTOF(rpc_kvdev_mem_get_entry_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	key_len = strlen(req.key);
+	if (key_len < 1 || key_len > 16) {
+		spdk_jsonrpc_send_error_response(request, -EINVAL, "key must be 1-16 bytes");
+		goto cleanup;
+	}
+
+	rc = kvdev_mem_get_entry(req.name, req.key, (uint8_t)key_len, &info);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint32(w, "value_len", info.value_len);
+	spdk_json_write_named_bool(w, "ttl_valid", info.ttl_valid);
+	spdk_json_write_named_uint32(w, "ttl", info.ttl);
+	spdk_json_write_named_uint64(w, "deadline", info.deadline);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+
+cleanup:
+	free_rpc_kvdev_mem_get_entry(&req);
+}
+SPDK_RPC_REGISTER("kvdev_mem_get_entry", rpc_kvdev_mem_get_entry, SPDK_RPC_RUNTIME)

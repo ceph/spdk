@@ -3236,6 +3236,41 @@ Example response:
 }
 ~~~
 
+### kvdev_mem_get_entry {#rpc_kvdev_mem_get_entry}
+
+{{ kvdev_mem_get_entry_description }}
+
+#### Parameters
+
+{{ kvdev_mem_get_entry_params }}
+
+#### Response
+
+{{ kvdev_mem_get_entry_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_mem_get_entry", "KvRados5", "ABC") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "value_len": 122,
+      "ttl_valid": true,
+      "ttl": 2500,
+      "deadline": 3200
+    }
+  ]
+}
+~~~
+
 ### nvmf_subsystem_add_kv_ns {#rpc_nvmf_subsystem_add_kv_ns}
 
 {{ nvmf_subsystem_add_kv_ns_description }}
