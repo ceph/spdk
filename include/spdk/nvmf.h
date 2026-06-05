@@ -1330,6 +1330,24 @@ uint32_t spdk_nvmf_subsystem_add_ns_ext(struct spdk_nvmf_subsystem *subsystem,
 					const char *ptpl_file);
 
 /**
+ * Add a Key-Value namespace to a subsystem in the PAUSED or INACTIVE state.
+ *
+ * The namespace is backed by a kvdev (see <spdk/kvdev.h>) rather than a bdev,
+ * and reports CSI = SPDK_NVME_CSI_KV. May only be performed on subsystems in
+ * the PAUSED or INACTIVE states.
+ *
+ * \param subsystem Subsystem to add the namespace to.
+ * \param kvdev_name kvdev name to bind as a namespace.
+ * \param opts Namespace options, or NULL to use defaults.
+ * \param opts_size sizeof(*opts)
+ *
+ * \return newly added NSID on success, or 0 on failure.
+ */
+uint32_t spdk_nvmf_subsystem_add_kv_ns(struct spdk_nvmf_subsystem *subsystem,
+				       const char *kvdev_name,
+				       const struct spdk_nvmf_ns_opts *opts, size_t opts_size);
+
+/**
  * Remove a namespace from a subsystem.
  *
  * May only be performed on subsystems in the PAUSED or INACTIVE states.
