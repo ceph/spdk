@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 Intel Corporation and contributors. All rights reserved.
+//
+// KV Exec control-plane sidecar (ADR-0005).
+//
+// This service is the *privileged control plane* for the vendor "KV Exec"
+// command. It exposes get/set of the per-namespace KV Exec allowlist
+// (op-ID -> cls/method binding) and translates each RPC into the SPDK
+// JSON-RPC methods nvmf_ns_{get,set}_kv_exec_allowlist on a target reached
+// over its local unix socket.
+//
+// TRUST BOUNDARY: a client of this gRPC service decides which OSD-side
+// object-class operations a KV namespace may invoke. It MUST be network
+// isolated from tenants / the NVMe data plane. See README.md.
+
+syntax = "proto3";
+
+package spdk.kv_exec.v1;
+
+// One allowlist entry: a small integer op-ID and the (optional) backend
+// binding string it maps to (e.g. "cls.method"). The data path never sees
+// the binding string; only the op-ID crosses the NVMe command.
+message AllowlistEntry {
+  uint32 op_id = 1;     // vendor op-ID named by the KV Exec command
+  string binding = 2;   // backend cls/method binding; may be empty
+}
+
+// Identifies a single KV namespace by NVMe-oF subsystem NQN + NSID.
+// tgt_name selects the parent NVMe-oF target when more than one exists.
+message NamespaceRef {
+  string nqn = 1;
+  uint32 nsid = 2;
+  string tgt_name = 3;  // optional
+}
+
+message GetAllowlistRequest {
+  NamespaceRef ns = 1;
+}
+
+message GetAllowlistResponse {
+  repeated AllowlistEntry allowlist = 1;
+}
+
+// Replace the entire allowlist for a namespace. An empty `allowlist`
+// clears it (no op-IDs permitted).
+message SetAllowlistRequest {
+  NamespaceRef ns = 1;
+  repeated AllowlistEntry allowlist = 2;
+}
+
+message SetAllowlistResponse {
+  // Echoes the allowlist as stored by the target after the set.
+  repeated AllowlistEntry allowlist = 1;
+}
+
+service KvExecControl {
+  // Read the current per-namespace KV Exec allowlist.
+  rpc GetAllowlist(GetAllowlistRequest) returns (GetAllowlistResponse);
+
+  // Replace the per-namespace KV Exec allowlist (empty list clears it).
+  rpc SetAllowlist(SetAllowlistRequest) returns (SetAllowlistResponse);
+}
