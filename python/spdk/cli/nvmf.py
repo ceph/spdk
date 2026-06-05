@@ -432,6 +432,9 @@ def add_parser(subparsers):
     def nvmf_ns_set_kv_exec_allowlist(args):
         allowlist = []
         for u in args.allowlist:
+            if not u:
+                # An empty string (or trailing whitespace) clears the allowlist.
+                continue
             fields = u.split(':', 1)
             entry = {"op_id": int(fields[0])}
             if len(fields) > 1 and fields[1] != "":
