@@ -432,12 +432,17 @@ kvdev_mem_exec_append(struct kvdev_mem *mdev, const void *key, uint8_t key_len,
 
 static int
 kvdev_mem_exec(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
-	       uint32_t op_id, const void *input, uint32_t input_len,
+	       uint32_t op_id, const char *binding,
+	       const void *input, uint32_t input_len,
 	       void *output_buf, uint32_t output_buf_len,
 	       spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
 {
 	struct kvdev_mem_io_channel *mch = spdk_io_channel_get_ctx(ch);
 	struct kvdev_mem *mdev = mch->mdev;
+
+	/* The in-memory module selects the built-in by op_id alone; the opaque
+	 * binding (a (class,method) hint for the rados backend, KVX-3) is ignored. */
+	(void)binding;
 
 	switch (op_id) {
 	case KVDEV_MEM_EXEC_OP_ECHO:

@@ -398,6 +398,7 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		uint32_t input_len = xfer_len;
 		uint32_t output_len = cmd->cdw12_bits.kv_exec.osize;
 		uint32_t op_id = cmd->cdw13_bits.kv_exec.op_id;
+		const char *binding = NULL;
 
 		/*
 		 * Per-namespace KV Exec allowlist enforcement (ADR-0005). The trust
@@ -405,8 +406,12 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		 * allowlist is rejected here, BEFORE the backend exec op runs
 		 * (default-deny). Reject with INVALID_OPCODE — the same status the data
 		 * path already uses for an unsupported/absent KV Exec operation.
+		 * On success the allowlist lookup also yields the matching entry's
+		 * opaque binding (KVX-3), which we forward to the backend exec op:
+		 * the in-memory module ignores it; the librados module parses it as
+		 * "class:method" for rados_aio_exec.
 		 */
-		if (!nvmf_ns_kv_exec_op_allowed(ns, op_id, NULL)) {
+		if (!nvmf_ns_kv_exec_op_allowed(ns, op_id, &binding)) {
 			SPDK_DEBUGLOG(nvmf, "KV Exec op_id %u not in nsid %u allowlist; rejecting\n",
 				      op_id, ns->nsid);
 			free(kv_req);
@@ -430,7 +435,7 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 			goto err_nomem;
 		}
 
-		rc = spdk_kvdev_exec(ns->kvdev_desc, ch, key, key_len, op_id,
+		rc = spdk_kvdev_exec(ns->kvdev_desc, ch, key, key_len, op_id, binding,
 				     data, input_len, data, output_len,
 				     nvmf_kvdev_exec_done, kv_req);
 		if (rc == -ENOTSUP) {
