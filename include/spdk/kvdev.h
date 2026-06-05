@@ -55,6 +55,12 @@ enum spdk_kvdev_io_status {
 	SPDK_KVDEV_IO_STATUS_INVALID		= -4,
 	/** Out of memory / capacity. */
 	SPDK_KVDEV_IO_STATUS_NOMEM		= -5,
+	/**
+	 * The backend does not support this operation (e.g. the librados module
+	 * defers List per ADR-0002). The NVMf layer maps this to the NVMe
+	 * "command not supported"/invalid-opcode status.
+	 */
+	SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED	= -7,
 };
 
 /**

@@ -709,6 +709,22 @@ return_objects:
       - name: count
         type: uint32
         description: Number of new devices found
+  - name: kvdev_rados_cluster
+    fields:
+      - name: name
+        type: string
+        description: Name of the rados cluster handle
+      - name: user_id
+        type: string
+        description: Ceph client id
+      - name: config_param
+        type: object
+        class: rados_config_param
+        description: Librados configuration
+      - name: config_file
+        type: string
+        description: Librados configuration
+        description: Path of the librados (ceph.conf) configuration file
 return_arrays:
   - name: rpc_methods
     item_type: string
@@ -716,6 +732,11 @@ return_arrays:
     item_type: string
   - name: notification_types
     item_type: string
+  - name: rados_config_param
+    item_type: string
+  - name: kvdev_rados_cluster_infos
+    item_type: object
+    class: kvdev_rados_cluster
 arrays:
   - name: nvmf_kv_exec_allowlist
     item_type: object
@@ -1906,6 +1927,85 @@ methods:
         type: string
         required: true
         description: Key (1-16 byte ASCII string) of the entry to inspect
+  - name: kvdev_rados_register_cluster
+    description: 'Register a named, shared rados cluster handle'
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the rados cluster handle
+      - name: user_id
+        type: string
+        description: Ceph client id (e.g. admin, not client.admin)
+      - name: config_param
+        type: string
+        description: Explicit librados configuration
+      - name: config_file
+        type: string
+        description: Path of the rados (ceph.conf) configuration file
+      - name: key_file
+        type: string
+        description: Path of the rados keyring file
+  - name: kvdev_rados_unregister_cluster
+    description: 'Unregister a named rados cluster handle'
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the rados cluster handle
+  - name: kvdev_rados_get_clusters
+    description: 'Show registered rados cluster handles'
+    result:
+      type: array
+      class: kvdev_rados_cluster_infos
+      description: The rados clusters info
+    params:
+      - name: name
+        type: string
+        description: Rados cluster object name (omit for all)
+  - name: kvdev_rados_create
+    description: 'Create a librados-backed kvdev'
+    result:
+      type: string
+      description: kvdev name
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the rados kvdev
+      - name: cluster_name
+        type: string
+        required: true
+        description: Name of a registered rados cluster
+      - name: pool_name
+        type: string
+        required: true
+        description: Rados pool (pre-provisioned; maps to the subsystem)
+      - name: namespace
+        type: string
+        description: Rados namespace (maps to the KV namespace)
+      - name: uuid
+        type: uuid
+        description: UUID of the kvdev (optional)
+      - name: max_value_len
+        type: uint32
+        description: Maximum value length in bytes (0 for the 64 MB default)
+  - name: kvdev_rados_delete
+    description: 'Delete a librados-backed kvdev'
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: name
+        type: string
+        required: true
+        description: Name of the rados kvdev
   - name: nvmf_subsystem_add_kv_ns
     description: 'Add a Key-Value namespace to an NVMe-oF subsystem'
     result:

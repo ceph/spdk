@@ -10,6 +10,12 @@ SO_MINOR := 0
 
 CFLAGS += -I$(SPDK_ROOT_DIR)/module/kvdev/mem
 
+# When the librados kvdev is built (--with-rbd), let the subsystem emit its
+# config (cluster registrations + kvdev_rados_create) too.
+ifeq ($(CONFIG_RBD),y)
+CFLAGS += -I$(SPDK_ROOT_DIR)/module/kvdev/rados -DSPDK_CONFIG_KVDEV_RADOS
+endif
+
 C_SRCS = kvdev.c
 LIBNAME = event_kvdev
 

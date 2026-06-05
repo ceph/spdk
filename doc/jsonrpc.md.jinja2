@@ -3271,6 +3271,152 @@ Example response:
 }
 ~~~
 
+### kvdev_rados_register_cluster {#rpc_kvdev_rados_register_cluster}
+
+{{ kvdev_rados_register_cluster_description }}
+
+#### Parameters
+
+{{ kvdev_rados_register_cluster_params }}
+
+#### Response
+
+{{ kvdev_rados_register_cluster_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_rados_register_cluster", "KvRados5", "--user", "cinder") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### kvdev_rados_unregister_cluster {#rpc_kvdev_rados_unregister_cluster}
+
+{{ kvdev_rados_unregister_cluster_description }}
+
+#### Parameters
+
+{{ kvdev_rados_unregister_cluster_params }}
+
+#### Response
+
+{{ kvdev_rados_unregister_cluster_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_rados_unregister_cluster", "KvRados5" }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### kvdev_rados_get_clusters {#rpc_kvdev_rados_get_clusters}
+
+{{ kvdev_rados_get_clusters_description }}
+
+#### Parameters
+
+{{ kvdev_rados_get_clusters_params }}
+
+#### Response
+
+{{ kvdev_rados_get_clusters_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_rados_get_clusters", "KvRados5" }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "cluster_name": "KvRados5",
+      "user_id": "cinder"
+    }
+  ]
+}
+~~~
+
+### kvdev_rados_create {#rpc_kvdev_rados_create}
+
+{{ kvdev_rados_create_description }}
+
+#### Parameters
+
+{{ kvdev_rados_create_params }}
+
+#### Response
+
+{{ kvdev_rados_create_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_rados_create", "KvRados5", "ClusA", "pool1", "--namespace", "kvns") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "KvRados5"
+}
+~~~
+
+### kvdev_rados_delete {#rpc_kvdev_rados_delete}
+
+{{ kvdev_rados_delete_description }}
+
+#### Parameters
+
+{{ kvdev_rados_delete_params }}
+
+#### Response
+
+{{ kvdev_rados_delete_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_rados_delete", "KvRados5") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+
 ### nvmf_subsystem_add_kv_ns {#rpc_nvmf_subsystem_add_kv_ns}
 
 {{ nvmf_subsystem_add_kv_ns_description }}
