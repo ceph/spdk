@@ -457,11 +457,38 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	 */
 	if (spdk_nvme_ns_get_csi(ns) == SPDK_NVME_CSI_KV) {
 		const struct spdk_nvme_kv_ns_data *kv_data = spdk_nvme_kv_ns_get_data(ns);
+		const struct spdk_nvme_kv_format *kvf;
+		uint8_t kvfi;
 		uint32_t kv_bs;
 		uint64_t num_keys;
 
 		if (kv_data == NULL) {
 			SPDK_ERRLOG("file_name: '%s', KV namespace data unavailable\n", f->file_name);
+			g_error = true;
+			return;
+		}
+
+		/* Select the namespace's ACTIVE KV format, not a hardcoded index.
+		 * The active format index is reported in kvfc.kvfi (KV Format
+		 * Capabilities, per the KV Command Set spec). All format-derived
+		 * limits (kvkml/kvvml/mnks) must be read from that entry.
+		 */
+		kvfi = kv_data->kvfc.kvfi;
+		if (kvfi >= SPDK_COUNTOF(kv_data->kvf)) {
+			SPDK_ERRLOG("KV namespace active format index %u out of range\n", kvfi);
+			g_error = true;
+			return;
+		}
+		kvf = &kv_data->kvf[kvfi];
+
+		/* The engine always emits a fixed FIO_KV_KEY_LEN-byte key. If the
+		 * active format's advertised max key length (kvkml) is smaller, the
+		 * device would reject every I/O (100% IO errors). Fail clearly here.
+		 * kvkml == 0 means "not advertised", so it is not treated as a limit.
+		 */
+		if (kvf->kvkml != 0 && kvf->kvkml < FIO_KV_KEY_LEN) {
+			SPDK_ERRLOG("KV namespace active format %u max key length %u < required %u bytes\n",
+				    kvfi, kvf->kvkml, FIO_KV_KEY_LEN);
 			g_error = true;
 			return;
 		}
@@ -485,9 +512,9 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 			g_error = true;
 			return;
 		}
-		if (kv_data->kvf[0].kvvml != 0 && kv_bs > kv_data->kvf[0].kvvml) {
+		if (kvf->kvvml != 0 && kv_bs > kvf->kvvml) {
 			SPDK_ERRLOG("blocksize %u exceeds KV max value length %u\n",
-				    kv_bs, kv_data->kvf[0].kvvml);
+				    kv_bs, kvf->kvvml);
 			g_error = true;
 			return;
 		}
@@ -495,16 +522,19 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		fio_qpair->kv_enabled = true;
 		fio_qpair->kv_block_size = kv_bs;
 
-		/* Bound the keyspace: prefer the namespace's advertised max key
-		 * count (mnks); otherwise fall back to the namespace size in
-		 * bytes (nsze) divided by the blocksize.
+		/* Bound the keyspace using the active format's advertised max key
+		 * count (mnks).
+		 *
+		 * When mnks == 0 the device advertises "no maximum indicated". We
+		 * deliberately do NOT derive a key count from nsze/blocksize: nsze
+		 * is a byte capacity, not a key count, and a single key may hold a
+		 * value far larger than one blocksize, so nsze/blocksize would let
+		 * fio address keys beyond real capacity. Instead fall back to a
+		 * fixed, modest keyspace so the workload stays bounded.
 		 */
-		num_keys = kv_data->kvf[0].mnks;
+		num_keys = kvf->mnks;
 		if (num_keys == 0) {
-			num_keys = kv_data->nsze ? (kv_data->nsze / kv_bs) : 0;
-		}
-		if (num_keys == 0) {
-			/* Default to a modest keyspace if the device advertises none. */
+			/* No advertised maximum: use a fixed, modest keyspace. */
 			num_keys = 65536;
 		}
 
@@ -1186,6 +1216,18 @@ spdk_fio_completion_cb(void *ctx, const struct spdk_nvme_cpl *cpl)
 
 	if (spdk_nvme_cpl_is_error(cpl)) {
 		fio_req->io->error = EIO;
+	} else if (fio_qpair->kv_enabled && fio_req->io->ddir == DDIR_READ) {
+		/* On a successful KV Retrieve the device returns the actual stored
+		 * value length in completion DW0. If the value is shorter than the
+		 * requested blocksize, report the residual (bytes not transferred)
+		 * so fio accounting and verify see the true transferred length
+		 * instead of a full-blocksize success.
+		 */
+		uint64_t value_len = cpl->cdw0;
+
+		if (value_len < fio_req->io->xfer_buflen) {
+			fio_req->io->resid = fio_req->io->xfer_buflen - value_len;
+		}
 	}
 
 	assert(fio_thread->iocq_count < fio_thread->iocq_size);

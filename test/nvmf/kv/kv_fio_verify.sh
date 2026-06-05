@@ -27,6 +27,15 @@ rpc_py="$rootdir/scripts/rpc.py -s $rpc_sock"
 fio_plugin="$rootdir/build/fio/spdk_nvme"
 fio_job="$testdir/kv_verify.fio"
 
+# Resolve the fio binary from the configured --with-fio source tree
+# (CONFIG_FIO_SOURCE_DIR, sourced above) rather than a bare PATH lookup, so a
+# missing or mismatched system fio cannot silently run/skip the test against
+# the wrong binary. Fall back to PATH only if the source tree has no built fio.
+fio_bin="$CONFIG_FIO_SOURCE_DIR/fio"
+if [[ ! -x $fio_bin ]]; then
+	fio_bin=$(type -P fio || true)
+fi
+
 mkdir -p "$muser_dir"
 
 cleanup() {
@@ -41,6 +50,13 @@ if [[ ! -e $fio_plugin ]]; then
 	echo "kv_fio_verify: SKIP (SPDK fio plugin not built at $fio_plugin;"
 	echo "  reconfigure with ./configure --with-fio=<fio-src> and run make)"
 	exit 0
+fi
+
+if [[ -z $fio_bin || ! -x $fio_bin ]]; then
+	echo "kv_fio_verify: FAIL (no fio binary found; expected"
+	echo "  \$CONFIG_FIO_SOURCE_DIR/fio at '$CONFIG_FIO_SOURCE_DIR/fio'."
+	echo "  Build fio in the --with-fio source tree or put fio on PATH.)"
+	exit 1
 fi
 
 # Start the target.
@@ -67,15 +83,28 @@ $rpc_py nvmf_subsystem_add_listener "$nqn" -t VFIOUSER -a "$muser_dir" -s 0
 # whole transport URI as a single filename.
 escaped_nqn=${nqn//:/\\:}
 fio_log="$sock_dir/fio.log"
-LD_PRELOAD="$fio_plugin" fio "$fio_job" \
+LD_PRELOAD="$fio_plugin" "$fio_bin" "$fio_job" \
 	--filename="trtype=VFIOUSER traddr=${muser_dir} subnqn=${escaped_nqn} ns=1" \
 	2>&1 | tee "$fio_log"
 rc=${PIPESTATUS[0]}
 
 if [[ $rc -eq 0 ]]; then
 	# fio returns 0 on success; verify=crc32c makes a failed verify fatal, so a
-	# clean exit means every Store round-tripped through Retrieve.
-	if grep -qiE "verify failed|bad magic|verify bytes|err= *[1-9]" "$fio_log"; then
+	# clean exit means every Store round-tripped through Retrieve. Belt-and-
+	# suspenders: scan the log for any verify/IO failure indicator, since some
+	# fio builds/paths can surface a mismatch without a non-zero exit (e.g. when
+	# continue_on_error is in effect). The pattern intentionally covers fio's
+	# many verify-mismatch phrasings (header/crc/pattern/magic), the per-job
+	# error summary (err=N, io_u error), and explicit failure tallies.
+	verify_re='verify[ _]failed'
+	verify_re+='|verify: bad|bad magic|verify bytes|got buflen'
+	verify_re+='|header (crc|magic|number|rand|len|interval)|verify_state'
+	verify_re+='|(crc32c|crc32|crc16|crc7|crc64|md5|sha[0-9]+|xxhash|pattern)[ :].*(verify|mismatch|expected|fail)'
+	verify_re+='|data mismatch|verify mismatch|content mismatch'
+	verify_re+='|io_u (verify|error)|completed with error'
+	verify_re+='|err= *[1-9]|, *err=[1-9]'
+	verify_re+='|[1-9][0-9]* (verify|checksum) (errors|failures)'
+	if grep -qiE "$verify_re" "$fio_log"; then
 		echo "kv_fio_verify: FAIL (fio reported verify/io errors)"
 		rc=1
 	fi
