@@ -46,11 +46,39 @@ $rpc_py nvmf_create_subsystem "$nqn" -s SPDKKV001 -a
 $rpc_py nvmf_subsystem_add_kv_ns "$nqn" "$kvdev_name"
 $rpc_py nvmf_subsystem_add_listener "$nqn" -t VFIOUSER -a "$muser_dir" -s 0
 
-# Run the host: attach over vfio-user and do Store + Retrieve.
+# Run the host: attach over vfio-user, check the TTL capability bit in identify,
+# and do a Store (with a vendor TTL via the _ext API) + Retrieve.
 # The listener creates a socket at "$muser_dir/cntrl"; the host's vfio-user
 # transport address is the directory that contains it.
-"$testdir/kv_host" "$muser_dir"
-rc=$?
+# host_key / expected_ttl must match kv_host.c (g_key / KV_TEST_TTL_SECONDS).
+host_key="kvkey01"
+expected_ttl=4242
+
+host_log="$sock_dir/kv_host.log"
+"$testdir/kv_host" "$muser_dir" 2>&1 | tee "$host_log"
+rc=${PIPESTATUS[0]}
+
+if [[ $rc -eq 0 ]]; then
+	# Assert the host saw the TTL capability bit in KV Identify.
+	if ! grep -q "KV TTL capability: SUPPORTED" "$host_log"; then
+		echo "kv_vfio_user: FAIL (TTL capability bit not advertised in identify)"
+		rc=1
+	fi
+fi
+
+if [[ $rc -eq 0 ]]; then
+	# Assert the TTL round-tripped into the backend (store-only persistence).
+	entry_json=$($rpc_py kvdev_mem_get_entry "$kvdev_name" "$host_key")
+	echo "kvdev_mem_get_entry => $entry_json"
+	got_ttl=$(echo "$entry_json" | python3 -c 'import sys, json; print(json.load(sys.stdin)["ttl"])')
+	got_valid=$(echo "$entry_json" | python3 -c 'import sys, json; print(str(json.load(sys.stdin)["ttl_valid"]).lower())')
+	if [[ "$got_valid" != "true" || "$got_ttl" != "$expected_ttl" ]]; then
+		echo "kv_vfio_user: FAIL (TTL did not round-trip: ttl_valid=$got_valid ttl=$got_ttl, expected $expected_ttl)"
+		rc=1
+	else
+		echo "TTL round-trip OK: ttl_valid=$got_valid ttl=$got_ttl"
+	fi
+fi
 
 # Tear down.
 $rpc_py nvmf_subsystem_remove_listener "$nqn" -t VFIOUSER -a "$muser_dir" -s 0
