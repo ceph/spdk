@@ -34,6 +34,20 @@ rpc_py="$rootdir/scripts/rpc.py -s $rpc_sock"
 
 mkdir -p "$muser_dir"
 
+# Fail-fast OSD liveness precheck (KVX-3). KV Exec maps to an OSD-side
+# rados_aio_exec; if the vstart OSD is DOWN or WEDGED the e2e would otherwise
+# hang. Probe the pool with a hard, bounded timeout BEFORE bringing up the
+# target so a dead cluster is reported in seconds with a clear message. We use
+# the Ceph CLI from the same build dir as the conf.
+OSD_PRECHECK_TIMEOUT_S="${OSD_PRECHECK_TIMEOUT_S:-15}"
+rados_bin="$(dirname "$CEPH_CONF")/bin/rados"
+[[ -x "$rados_bin" ]] || rados_bin="rados"
+if ! timeout "$OSD_PRECHECK_TIMEOUT_S" "$rados_bin" -c "$CEPH_CONF" -p "$pool_name" ls >/dev/null 2>&1; then
+	echo "kv_rados_exec: FAIL (OSD/pool '$pool_name' not reachable within ${OSD_PRECHECK_TIMEOUT_S}s; is the vstart OSD up?)"
+	exit 1
+fi
+echo "OSD liveness precheck: pool '$pool_name' reachable"
+
 cleanup() {
 	if [[ -n ${nvmfpid:-} ]]; then
 		killprocess $nvmfpid || true
