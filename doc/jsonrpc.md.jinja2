@@ -3180,6 +3180,90 @@ Example response:
 }
 ~~~
 
+### kvdev_mem_create {#rpc_kvdev_mem_create}
+
+{{ kvdev_mem_create_description }}
+
+#### Parameters
+
+{{ kvdev_mem_create_params }}
+
+#### Response
+
+{{ kvdev_mem_create_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_mem_create", "KvRados0", "1") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "KvRados0"
+}
+~~~
+
+### kvdev_mem_delete {#rpc_kvdev_mem_delete}
+
+{{ kvdev_mem_delete_description }}
+
+#### Parameters
+
+{{ kvdev_mem_delete_params }}
+
+#### Response
+
+{{ kvdev_mem_delete_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("kvdev_mem_delete", "KvRados0", "1") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### nvmf_subsystem_add_kv_ns {#rpc_nvmf_subsystem_add_kv_ns}
+
+{{ nvmf_subsystem_add_kv_ns_description }}
+
+#### Parameters
+
+{{ nvmf_subsystem_add_kv_ns_params }}
+
+#### Response
+
+{{ nvmf_subsystem_add_kv_ns_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_subsystem_add_kv_ns", "nqn.2016-06.io.spdk:cnode1", "KvRados0", "-n", "3") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": 3
+}
+~~~
+
 ### bdev_aio_create {#rpc_bdev_aio_create}
 
 {{ bdev_aio_create_description }}

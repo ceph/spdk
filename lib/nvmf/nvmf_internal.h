@@ -18,6 +18,7 @@
 #include "spdk/nvmf_spec.h"
 #include "spdk/assert.h"
 #include "spdk/bdev.h"
+#include "spdk/kvdev.h"
 #include "spdk/queue.h"
 #include "spdk/util.h"
 #include "spdk/thread.h"
@@ -240,6 +241,10 @@ struct spdk_nvmf_ns {
 	struct spdk_nvmf_subsystem *subsystem;
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc;
+	/* For Key-Value namespaces (csi == SPDK_NVME_CSI_KV), the namespace is
+	 * backed by a kvdev instead of a bdev; bdev/desc are NULL in that case. */
+	struct spdk_kvdev *kvdev;
+	struct spdk_kvdev_desc *kvdev_desc;
 	struct spdk_nvmf_ns_opts opts;
 	/* reservation notification mask */
 	uint32_t mask;
@@ -528,6 +533,14 @@ int nvmf_bdev_ctrlr_copy_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc
 int nvmf_bdev_ctrlr_nvme_passthru_io(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 				     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
 bool nvmf_bdev_zcopy_enabled(struct spdk_bdev *bdev);
+
+/* Key-Value (KV) command set support (ctrlr_kvdev.c). */
+void nvmf_kvdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns,
+				  struct spdk_nvme_kv_ns_data *nsdata);
+void nvmf_kvdev_ctrlr_identify_ctrlr(struct spdk_nvmf_ctrlr *ctrlr,
+				     struct spdk_nvme_kv_ctrlr_data *cdata);
+int nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel *ch,
+				    struct spdk_nvmf_request *req);
 
 int nvmf_subsystem_add_ctrlr(struct spdk_nvmf_subsystem *subsystem,
 			     struct spdk_nvmf_ctrlr *ctrlr);

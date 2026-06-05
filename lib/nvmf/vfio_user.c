@@ -3823,7 +3823,11 @@ nvmf_vfio_user_get_subsystem_numa_id(struct spdk_nvmf_subsystem *subsystem)
 
 	for (ns = spdk_nvmf_subsystem_get_first_ns(subsystem); ns != NULL;
 	     ns = spdk_nvmf_subsystem_get_next_ns(subsystem, ns)) {
-		assert(ns->bdev != NULL);
+		/* Key-Value namespaces are backed by a kvdev with no NUMA affinity;
+		 * treat them as ANY NUMA node. */
+		if (ns->bdev == NULL) {
+			return SPDK_ENV_NUMA_ID_ANY;
+		}
 
 		bdev_numa_id = spdk_bdev_get_numa_id(ns->bdev);
 
@@ -3883,7 +3887,10 @@ nvmf_vfio_user_subsystem_add_ns(struct spdk_nvmf_transport *transport,
 	 * Endpoint can require specific NUMA node ID, if it does compare it
 	 * with new bdev added to the subsystem.
 	 */
-	if (endpoint->numa_id != SPDK_ENV_NUMA_ID_ANY &&
+	/* Key-Value namespaces have no NUMA affinity, so they impose no
+	 * constraint on the endpoint's NUMA node. */
+	if (ns->bdev != NULL &&
+	    endpoint->numa_id != SPDK_ENV_NUMA_ID_ANY &&
 	    endpoint->numa_id != spdk_bdev_get_numa_id(ns->bdev)) {
 		SPDK_ERRLOG("Endpoint %s requires numa_id %d, cannot add bdev with numa_id %d\n",
 			    endpoint_id(endpoint), endpoint->numa_id, spdk_bdev_get_numa_id(ns->bdev));
@@ -4741,9 +4748,15 @@ get_nvmf_io_req_length(struct spdk_nvmf_request *req)
 
 	nsid = cmd->nsid;
 	ns = _nvmf_subsystem_get_ns(ctrlr->subsys, nsid);
-	if (ns == NULL || ns->bdev == NULL) {
+	if (ns == NULL || (ns->bdev == NULL && ns->kvdev == NULL)) {
 		SPDK_ERRLOG("unsuccessful query for nsid %u\n", cmd->nsid);
 		return -EINVAL;
+	}
+
+	/* Key-Value commands carry the transfer length (value or host buffer
+	 * size) in CDW10, independent of any block geometry. */
+	if (ns->csi == SPDK_NVME_CSI_KV) {
+		return cmd->cdw10_bits.kv.vsize;
 	}
 
 	if (cmd->opc == SPDK_NVME_OPC_DATASET_MANAGEMENT) {
