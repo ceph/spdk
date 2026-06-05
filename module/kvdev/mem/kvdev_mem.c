@@ -8,6 +8,7 @@
 #include "spdk/string.h"
 #include "spdk/log.h"
 #include "spdk/tree.h"
+#include "spdk/queue_extras.h"
 #include "spdk/util.h"
 #include "spdk/json.h"
 
@@ -45,8 +46,11 @@ struct kvdev_mem_io_channel {
 
 static TAILQ_HEAD(, kvdev_mem) g_kvdev_mem_head = TAILQ_HEAD_INITIALIZER(g_kvdev_mem_head);
 
+static void kvdev_mem_module_fini(void);
+
 static struct spdk_kvdev_module g_kvdev_mem_module = {
 	.name = "kvdev_mem",
+	.module_fini = kvdev_mem_module_fini,
 };
 
 SPDK_KVDEV_MODULE_REGISTER(kvdev_mem, &g_kvdev_mem_module)
@@ -342,6 +346,23 @@ kvdev_mem_delete(const char *name)
 	}
 
 	return spdk_kvdev_unregister(kvdev);
+}
+
+/*
+ * Module teardown: destroy any in-memory kvdevs still alive at shutdown so
+ * their per-kvdev spdk_io_device is unregistered (otherwise
+ * spdk_thread_lib_fini logs "io_device <name> not unregistered").  Reuses the
+ * normal kvdev_mem_delete() teardown path, which unregisters the io_device and
+ * frees state.  Idempotent and a no-op when no kvdevs remain.
+ */
+static void
+kvdev_mem_module_fini(void)
+{
+	struct kvdev_mem *mdev, *tmp;
+
+	TAILQ_FOREACH_SAFE(mdev, &g_kvdev_mem_head, tailq, tmp) {
+		kvdev_mem_delete(mdev->kvdev.name);
+	}
 }
 
 void
