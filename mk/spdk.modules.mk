@@ -9,6 +9,9 @@ BLOCKDEV_MODULES_LIST += bdev_raid bdev_error bdev_gpt bdev_split bdev_delay
 BLOCKDEV_MODULES_LIST += bdev_zone_block
 BLOCKDEV_MODULES_LIST += blob_bdev blob lvol nvme
 
+# Key-Value device modules (kvdev is a sibling to bdev).
+KVDEV_MODULES_LIST = kvdev_mem kvdev
+
 # Some bdev modules don't have pollers, so they can directly run in interrupt mode
 INTR_BLOCKDEV_MODULES_LIST = bdev_malloc bdev_passthru bdev_error bdev_gpt bdev_split bdev_raid
 # Logical volume and blobstore can directly run in both interrupt mode and poll mode.
@@ -136,6 +139,6 @@ ifeq ($(CONFIG_AIO_FSDEV), y)
 FSDEV_MODULES_LIST = fsdev_aio
 endif
 
-ALL_MODULES_LIST = $(BLOCKDEV_MODULES_LIST) $(ACCEL_MODULES_LIST) $(SCHEDULER_MODULES_LIST) $(SOCK_MODULES_LIST)
+ALL_MODULES_LIST = $(BLOCKDEV_MODULES_LIST) $(KVDEV_MODULES_LIST) $(ACCEL_MODULES_LIST) $(SCHEDULER_MODULES_LIST) $(SOCK_MODULES_LIST)
 ALL_MODULES_LIST += $(VFU_DEVICE_MODULES_LIST) $(KEYRING_MODULES_LIST) $(FSDEV_MODULES_LIST)
 SYS_LIBS += $(BLOCKDEV_MODULES_PRIVATE_LIBS)
