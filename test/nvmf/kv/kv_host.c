@@ -22,6 +22,13 @@
 static const char g_key[] = "kvkey01";
 static const char g_value[] = "the quick brown fox jumps over the lazy dog";
 
+/* Extra keys stored to exercise the KV List command. g_key above is also
+ * expected to come back from List. */
+static const char *const g_list_keys[] = {
+	"alpha", "bravo", "charlie", "delta",
+};
+#define NUM_LIST_KEYS (sizeof(g_list_keys) / sizeof(g_list_keys[0]))
+
 struct kv_ctx {
 	struct spdk_nvme_ctrlr	*ctrlr;
 	struct spdk_nvme_ns	*ns;
@@ -116,7 +123,9 @@ main(int argc, char **argv)
 	uint32_t nsid;
 	char *store_buf = NULL;
 	char *retrieve_buf = NULL;
+	uint8_t *list_buf = NULL;
 	const uint32_t buf_len = 256;
+	uint32_t i;
 	int rc = 1;
 	int sc;
 
@@ -176,7 +185,8 @@ main(int argc, char **argv)
 	/* I/O data buffers must live in DMA-registered memory for vfio-user. */
 	store_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
 	retrieve_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
-	if (store_buf == NULL || retrieve_buf == NULL) {
+	list_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+	if (store_buf == NULL || retrieve_buf == NULL || list_buf == NULL) {
 		fprintf(stderr, "Failed to allocate DMA buffers\n");
 		goto free_qpair;
 	}
@@ -258,11 +268,106 @@ main(int argc, char **argv)
 	fprintf(stderr, "KV Delete (absent) OK: sc=0x87 (KEY_DOES_NOT_EXIST)\n");
 
 	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete sequence succeeded\n");
+
+	/*
+	 * Slice 2 deleted g_key above; the List check below expects g_key to be
+	 * present (expected = NUM_LIST_KEYS + 1), so re-store it before listing.
+	 */
+	memcpy(store_buf, g_value, sizeof(g_value));
+	rc = spdk_nvme_kv_store(ctx.ns, ctx.qpair, g_key, sizeof(g_key),
+				store_buf, sizeof(g_value), io_complete, &ctx, 0);
+	if (rc != 0 || wait_for_completion(&ctx) != 0) {
+		fprintf(stderr, "KV re-store of g_key before List failed\n");
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV re-store of g_key before List OK\n");
+
+	/* Store several more keys, then List them all back. */
+	for (i = 0; i < NUM_LIST_KEYS; i++) {
+		uint8_t klen = (uint8_t)strlen(g_list_keys[i]);
+
+		memset(store_buf, 0, buf_len);
+		store_buf[0] = 'x';
+		rc = spdk_nvme_kv_store(ctx.ns, ctx.qpair, g_list_keys[i], klen,
+					store_buf, 1, io_complete, &ctx, 0);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Store of list key '%s' failed\n", g_list_keys[i]);
+			rc = 1;
+			goto free_qpair;
+		}
+	}
+	fprintf(stderr, "Stored %u additional keys for List\n", (unsigned)NUM_LIST_KEYS);
+
+	/* List from the beginning (NULL start key). */
+	memset(list_buf, 0, buf_len);
+	rc = spdk_nvme_kv_list(ctx.ns, ctx.qpair, NULL, 0, list_buf, buf_len,
+			       io_complete, &ctx);
+	if (rc != 0 || wait_for_completion(&ctx) != 0) {
+		fprintf(stderr, "KV List failed\n");
+		rc = 1;
+		goto free_qpair;
+	}
+
+	/* Parse the return data structure: 4-byte NRK, then per key
+	 * { 2-byte KL, key bytes, pad to 4-byte boundary }. Verify every key we
+	 * expect (g_key + the list keys) is present. */
+	{
+		uint32_t nrk, off = 4, found = 0, expected = NUM_LIST_KEYS + 1;
+		const char *all_keys[NUM_LIST_KEYS + 1];
+		uint8_t all_lens[NUM_LIST_KEYS + 1];
+		bool seen[NUM_LIST_KEYS + 1] = { false };
+		uint32_t j;
+
+		/* g_key was stored with its NUL terminator (sizeof), so its KV key
+		 * length is sizeof(g_key); the list keys were stored with strlen. */
+		all_keys[0] = g_key;
+		all_lens[0] = sizeof(g_key);
+		for (j = 0; j < NUM_LIST_KEYS; j++) {
+			all_keys[j + 1] = g_list_keys[j];
+			all_lens[j + 1] = (uint8_t)strlen(g_list_keys[j]);
+		}
+
+		memcpy(&nrk, list_buf, sizeof(nrk));
+		fprintf(stderr, "KV List returned NRK=%u\n", nrk);
+
+		for (i = 0; i < nrk && off + 2 <= buf_len; i++) {
+			uint16_t kl;
+
+			memcpy(&kl, list_buf + off, sizeof(kl));
+			off += sizeof(kl);
+			if (off + kl > buf_len) {
+				break;
+			}
+			for (j = 0; j < expected; j++) {
+				if (!seen[j] && all_lens[j] == kl &&
+				    memcmp(list_buf + off, all_keys[j], kl) == 0) {
+					seen[j] = true;
+					found++;
+					break;
+				}
+			}
+			/* Advance past the key and pad to the 4-byte boundary. */
+			off += kl;
+			off = (off + 3) & ~3u;
+		}
+
+		if (nrk != expected || found != expected) {
+			fprintf(stderr, "KV List MISMATCH: nrk=%u found=%u expected=%u\n",
+				nrk, found, expected);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV List OK; all %u keys returned\n", expected);
+	}
+
+	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete/List round-trip succeeded\n");
 	rc = 0;
 
 free_qpair:
 	spdk_dma_free(store_buf);
 	spdk_dma_free(retrieve_buf);
+	spdk_dma_free(list_buf);
 	spdk_nvme_ctrlr_free_io_qpair(ctx.qpair);
 detach:
 	spdk_nvme_detach(ctx.ctrlr);

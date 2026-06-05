@@ -253,6 +253,48 @@ kvdev_mem_exist(struct spdk_io_channel *ch, const void *key, uint8_t key_len,
 }
 
 static int
+kvdev_mem_list(struct spdk_io_channel *ch, const void *start_key, uint8_t start_key_len,
+	       spdk_kvdev_list_cb iter_cb, void *iter_arg,
+	       spdk_kvdev_list_done_cb done_cb, void *done_arg)
+{
+	struct kvdev_mem_io_channel *mch = spdk_io_channel_get_ctx(ch);
+	struct kvdev_mem *mdev = mch->mdev;
+	struct kvdev_mem_entry *entry;
+	uint32_t num_keys = 0;
+
+	/*
+	 * The RB tree is ordered by kvdev_mem_entry_cmp(), which gives the
+	 * unspecified-but-stable iteration order the List contract requires.
+	 * start_key is a position into that order:
+	 *   - NULL/empty: start at the very first key (RB_MIN).
+	 *   - present:    start at that key.
+	 *   - absent:     start at the first key that sorts at-or-after it
+	 *                 (RB_NFIND), a stable vendor-specific start point.
+	 */
+	if (start_key == NULL || start_key_len == 0) {
+		entry = RB_MIN(kvdev_mem_tree, &mdev->tree);
+	} else {
+		struct kvdev_mem_entry find = {};
+
+		memcpy(find.key, start_key, start_key_len);
+		find.key_len = start_key_len;
+		entry = RB_NFIND(kvdev_mem_tree, &mdev->tree, &find);
+	}
+
+	for (; entry != NULL; entry = RB_NEXT(kvdev_mem_tree, &mdev->tree, entry)) {
+		if (!iter_cb(iter_arg, entry->key, entry->key_len)) {
+			/* Consumer is full (e.g. next key would not fit). Stop here;
+			 * this key was NOT accepted. */
+			break;
+		}
+		num_keys++;
+	}
+
+	done_cb(done_arg, SPDK_KVDEV_IO_STATUS_SUCCESS, num_keys);
+	return 0;
+}
+
+static int
 kvdev_mem_create_channel_cb(void *io_device, void *ctx_buf)
 {
 	struct kvdev_mem_io_channel *mch = ctx_buf;
@@ -314,6 +356,7 @@ static const struct spdk_kvdev_fn_table kvdev_mem_fn_table = {
 	.retrieve	= kvdev_mem_retrieve,
 	.del		= kvdev_mem_op_delete,
 	.exist		= kvdev_mem_exist,
+	.list		= kvdev_mem_list,
 };
 
 int
