@@ -91,18 +91,23 @@ struct kvdev_rados_io {
 	enum kvdev_rados_op		op;
 	rados_completion_t		comp;
 	rados_write_op_t		write_op;	/* STORE only */
+	rados_read_op_t			read_op;	/* RETRIEVE only */
 	uint64_t			stat_size;	/* RETRIEVE/EXIST scratch */
 	time_t				stat_mtime;	/* EXIST scratch */
+	size_t				bytes_read;	/* RETRIEVE: read_op_read out */
+	int				read_rval;	/* RETRIEVE: read_op_read rc */
 	uint32_t			buf_len;	/* RETRIEVE: caller buf size */
 	spdk_kvdev_io_completion_cb	cb_fn;
 	void				*cb_arg;
 	TAILQ_ENTRY(kvdev_rados_io)	link;
 };
 
+static int kvdev_rados_module_init(void);
 static void kvdev_rados_module_fini(void);
 
 static struct spdk_kvdev_module g_kvdev_rados_module = {
 	.name = "kvdev_rados",
+	.module_init = kvdev_rados_module_init,
 	.module_fini = kvdev_rados_module_fini,
 };
 
@@ -515,13 +520,25 @@ kvdev_rados_io_finish(struct kvdev_rados_io *io)
 	uint32_t value_len = 0;
 
 	if (io->op == KVDEV_RADOS_OP_RETRIEVE) {
-		if (ret >= 0) {
-			/* rados_aio_read returns bytes read into the buffer. The
-			 * true object size is not returned by aio_read, so a value
-			 * larger than the host buffer is reported as exactly buf_len
-			 * read; the host already sized the buffer from CDW10. */
-			value_len = (uint32_t)ret;
-			status = SPDK_KVDEV_IO_STATUS_SUCCESS;
+		/* The read_op bundles read + stat in one round-trip. ret is the
+		 * operate() return; the per-sub-op read result is io->read_rval and
+		 * the TRUE object size is io->stat_size. Report the true length so
+		 * the host can detect truncation and resize (matches kvdev_mem). */
+		status = kvdev_rados_xlate_status(io->op, ret);
+		if (ret >= 0 && io->read_rval >= 0) {
+			uint64_t true_size = io->stat_size;
+
+			value_len = (uint32_t)spdk_min(true_size, KVDEV_RADOS_MAX_VALUE_LEN);
+			if (true_size > io->buf_len) {
+				/* read_op copied at most buf_len bytes; report the
+				 * full length so the host knows it was truncated. */
+				status = SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL;
+			} else {
+				status = SPDK_KVDEV_IO_STATUS_SUCCESS;
+			}
+		} else if (ret >= 0) {
+			/* operate() succeeded but the read sub-op failed. */
+			status = kvdev_rados_xlate_status(io->op, io->read_rval);
 		}
 	} else if (io->op == KVDEV_RADOS_OP_EXIST && ret >= 0) {
 		status = SPDK_KVDEV_IO_STATUS_SUCCESS;
@@ -532,6 +549,9 @@ kvdev_rados_io_finish(struct kvdev_rados_io *io)
 	rados_aio_release(io->comp);
 	if (io->write_op) {
 		rados_release_write_op(io->write_op);
+	}
+	if (io->read_op) {
+		rados_release_read_op(io->read_op);
 	}
 	free(io);
 }
@@ -693,8 +713,28 @@ kvdev_rados_retrieve(struct spdk_io_channel *_ch, const void *key, uint8_t key_l
 	}
 	io->buf_len = buf_len;
 
-	rc = rados_aio_read(rdev->io_ctx, oid, io->comp, value_buf, buf_len, 0);
+	/*
+	 * Bundle read + stat in a single aio read_op so we learn the TRUE object
+	 * size in the same round-trip: read copies min(size, buf_len) bytes, stat
+	 * yields the full size. This lets Retrieve report the true value length
+	 * (and BUFFER_TOO_SMALL when truncated), matching the in-memory module,
+	 * without a second network round-trip.
+	 */
+	io->read_op = rados_create_read_op();
+	if (io->read_op == NULL) {
+		rados_aio_release(io->comp);
+		free(io);
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_NOMEM, 0);
+		return 0;
+	}
+
+	rados_read_op_read(io->read_op, 0, buf_len, value_buf, &io->bytes_read,
+			   &io->read_rval);
+	rados_read_op_stat(io->read_op, &io->stat_size, &io->stat_mtime, NULL);
+
+	rc = rados_aio_read_op_operate(io->read_op, rdev->io_ctx, io->comp, oid, 0);
 	if (rc < 0) {
+		rados_release_read_op(io->read_op);
 		rados_aio_release(io->comp);
 		free(io);
 		cb_fn(cb_arg, kvdev_rados_xlate_status(KVDEV_RADOS_OP_RETRIEVE, rc), 0);
@@ -987,6 +1027,19 @@ kvdev_rados_delete(const char *name)
 		return -EINVAL;
 	}
 	return spdk_kvdev_unregister(kvdev);
+}
+
+/*
+ * module_init clears g_shutting_down so a finish-then-reinit of the kvdev
+ * subsystem in the same process starts clean: module_fini latches it true, and
+ * without this reset a subsequent re-init could shut a cluster down out from
+ * under a live kvdev when a ref drops to 0.
+ */
+static int
+kvdev_rados_module_init(void)
+{
+	g_shutting_down = false;
+	return 0;
 }
 
 static void
