@@ -275,6 +275,26 @@ struct spdk_nvmf_ns {
 	bool always_visible;
 	/* Namespace id of the underlying device, used for passthrough commands */
 	uint32_t passthru_nsid;
+	/*
+	 * KV Exec allowlist (vendor extension, ADR-0005). Per-namespace set of
+	 * permitted op-IDs for the vendor KV Exec command. Default-deny: an op-ID
+	 * not present here is rejected before the kvdev exec op runs. Each entry
+	 * carries an optional opaque binding descriptor that backends interpret
+	 * (for the in-memory module the op-ID alone selects the built-in; the
+	 * (class,method) resolution is KVX-3/rados). Only meaningful for KV
+	 * namespaces (kvdev != NULL).
+	 */
+	struct spdk_nvmf_kv_exec_allow_entry *kv_exec_allowlist;
+	uint32_t kv_exec_allowlist_count;
+};
+
+/* One entry in a namespace's KV Exec allowlist (ADR-0005). */
+struct spdk_nvmf_kv_exec_allow_entry {
+	/* Permitted KV Exec operation ID (data-plane selector). */
+	uint32_t op_id;
+	/* Optional opaque binding descriptor the backend interprets (e.g. a
+	 * future cls/method hint). NULL when unset. Owned by the namespace. */
+	char *binding;
 };
 
 /*
@@ -581,6 +601,18 @@ void nvmf_ctrlr_reservation_notice_log(struct spdk_nvmf_ctrlr *ctrlr,
 bool nvmf_ns_is_ptpl_capable(const struct spdk_nvmf_ns *ns);
 struct spdk_nvme_rescap nvmf_ns_get_rescap(struct spdk_nvmf_ns *ns);
 size_t nvmf_ns_registrants_get_count(const struct spdk_nvmf_ns *ns);
+
+/* Free a namespace's KV Exec allowlist (ADR-0005) and its entries. */
+void nvmf_ns_kv_exec_allowlist_free(struct spdk_nvmf_ns *ns);
+
+/*
+ * Test whether op_id is permitted by the namespace's KV Exec allowlist
+ * (ADR-0005). Default-deny: returns false when op_id is absent (or the
+ * allowlist is empty). When the entry is found and binding_out is non-NULL,
+ * the entry's opaque binding (possibly NULL) is returned via *binding_out.
+ */
+bool nvmf_ns_kv_exec_op_allowed(const struct spdk_nvmf_ns *ns, uint32_t op_id,
+				const char **binding_out);
 
 static inline struct spdk_nvmf_host *
 nvmf_ns_find_host(struct spdk_nvmf_ns *ns, const char *hostnqn)

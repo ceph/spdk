@@ -869,6 +869,41 @@ nvmf_write_ns_add_host_config(struct spdk_json_write_ctx *w,
 	spdk_json_write_object_end(w);
 }
 
+/* Emit the per-namespace KV Exec allowlist (ADR-0005) so save_config/load_config
+ * round-trips it. Only KV namespaces with a non-empty allowlist produce an RPC. */
+static void
+nvmf_write_ns_kv_exec_allowlist_config(struct spdk_json_write_ctx *w,
+				       struct spdk_nvmf_subsystem *subsystem,
+				       struct spdk_nvmf_ns *ns)
+{
+	const struct spdk_nvmf_kv_exec_allow *entries = NULL;
+	uint32_t count = 0;
+	uint32_t i;
+
+	if (spdk_nvmf_ns_get_kv_exec_allowlist(subsystem, spdk_nvmf_ns_get_id(ns),
+					       &entries, &count) != 0 || count == 0) {
+		return;
+	}
+
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "method", "nvmf_ns_set_kv_exec_allowlist");
+	spdk_json_write_named_object_begin(w, "params");
+	spdk_json_write_named_string(w, "nqn", spdk_nvmf_subsystem_get_nqn(subsystem));
+	spdk_json_write_named_uint32(w, "nsid", spdk_nvmf_ns_get_id(ns));
+	spdk_json_write_named_array_begin(w, "allowlist");
+	for (i = 0; i < count; i++) {
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_uint32(w, "op_id", entries[i].op_id);
+		if (entries[i].binding != NULL) {
+			spdk_json_write_named_string(w, "binding", entries[i].binding);
+		}
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_array_end(w);
+	spdk_json_write_object_end(w);
+	spdk_json_write_object_end(w);
+}
+
 static void
 nvmf_write_create_subsystem_config(struct spdk_json_write_ctx *w,
 				   struct spdk_nvmf_subsystem *subsystem)
@@ -1039,6 +1074,18 @@ spdk_nvmf_tgt_write_config_json(struct spdk_json_write_ctx *w, struct spdk_nvmf_
 				TAILQ_FOREACH(host, &ns->hosts, link) {
 					nvmf_write_ns_add_host_config(w, subsystem, ns, host);
 				}
+			}
+		}
+	}
+	spdk_json_write_batch_end(w);
+
+	/* Emit nvmf_ns_set_kv_exec_allowlist RPCs as a batch (ADR-0005) */
+	spdk_json_write_batch_begin(w);
+	NVMF_SUBSYSTEM_FOREACH(tgt, subsystem) {
+		if (spdk_nvmf_subsystem_get_opts(subsystem)->type == SPDK_NVMF_SUBTYPE_NVME) {
+			for (ns = spdk_nvmf_subsystem_get_first_ns(subsystem); ns != NULL;
+			     ns = spdk_nvmf_subsystem_get_next_ns(subsystem, ns)) {
+				nvmf_write_ns_kv_exec_allowlist_config(w, subsystem, ns);
 			}
 		}
 	}

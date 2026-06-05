@@ -1805,6 +1805,147 @@ rpc_nvmf_subsystem_add_kv_ns(struct spdk_jsonrpc_request *request,
 }
 SPDK_RPC_REGISTER("nvmf_subsystem_add_kv_ns", rpc_nvmf_subsystem_add_kv_ns, SPDK_RPC_RUNTIME)
 
+/* KV Exec allowlist control RPCs (vendor extension, ADR-0005). The allowlist is
+ * per (subsystem, nsid) and default-deny; see lib/nvmf/ctrlr_kvdev.c for the
+ * data-path enforcement.  */
+
+static void
+rpc_nvmf_ns_set_kv_exec_allowlist_resumed(struct spdk_nvmf_subsystem *subsystem,
+		void *cb_arg, int status)
+{
+	struct rpc_nvmf_ns_set_kv_exec_allowlist_ctx *req = cb_arg;
+
+	if (req->request) {
+		spdk_jsonrpc_send_bool_response(req->request, true);
+	}
+}
+
+static void
+rpc_nvmf_ns_set_kv_exec_allowlist_paused(struct spdk_nvmf_subsystem *subsystem,
+		void *cb_arg, int status)
+{
+	struct rpc_nvmf_ns_set_kv_exec_allowlist_ctx *req = cb_arg;
+	struct spdk_nvmf_kv_exec_allow *entries = NULL;
+	uint32_t count = req->allowlist.count;
+	int ret;
+	uint32_t i;
+
+	if (count > 0) {
+		entries = calloc(count, sizeof(*entries));
+		if (entries == NULL) {
+			spdk_jsonrpc_send_error_response(req->request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Out of memory");
+			req->request = NULL;
+			goto resume;
+		}
+		for (i = 0; i < count; i++) {
+			entries[i].op_id = req->allowlist.items[i].op_id;
+			entries[i].binding = req->allowlist.items[i].binding;
+		}
+	}
+
+	ret = spdk_nvmf_ns_set_kv_exec_allowlist(subsystem, req->nsid, entries, count);
+	free(entries);
+	if (ret != 0) {
+		SPDK_ERRLOG("Unable to set KV Exec allowlist on nsid %u: %d\n", req->nsid, ret);
+		spdk_jsonrpc_send_error_response(req->request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		req->request = NULL;
+	}
+
+resume:
+	if (spdk_nvmf_subsystem_resume(subsystem, rpc_nvmf_ns_set_kv_exec_allowlist_resumed, req)) {
+		if (req->request) {
+			spdk_jsonrpc_send_error_response(req->request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Internal error");
+		}
+	}
+}
+
+static void
+rpc_nvmf_ns_set_kv_exec_allowlist(struct spdk_jsonrpc_request *request,
+				  const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_ns_set_kv_exec_allowlist_ctx req = {};
+	struct spdk_nvmf_subsystem *subsystem;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_nvmf_ns_set_kv_exec_allowlist_decoders,
+				    SPDK_COUNTOF(rpc_nvmf_ns_set_kv_exec_allowlist_decoders), &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		return;
+	}
+	req.request = request;
+
+	subsystem = _rpc_nvmf_get_subsystem(request, req.tgt_name, req.nqn, NULL);
+	if (!subsystem) {
+		return;
+	}
+
+	rc = spdk_nvmf_subsystem_pause(subsystem, req.nsid,
+				       rpc_nvmf_ns_set_kv_exec_allowlist_paused, &req);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
+	}
+}
+SPDK_RPC_REGISTER("nvmf_ns_set_kv_exec_allowlist", rpc_nvmf_ns_set_kv_exec_allowlist,
+		  SPDK_RPC_RUNTIME)
+
+static void
+rpc_nvmf_ns_get_kv_exec_allowlist(struct spdk_jsonrpc_request *request,
+				  const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_ns_get_kv_exec_allowlist_ctx req = {};
+	struct spdk_nvmf_subsystem *subsystem;
+	const struct spdk_nvmf_kv_exec_allow *entries = NULL;
+	struct spdk_json_write_ctx *w;
+	uint32_t count = 0;
+	uint32_t i;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_nvmf_ns_get_kv_exec_allowlist_decoders,
+				    SPDK_COUNTOF(rpc_nvmf_ns_get_kv_exec_allowlist_decoders), &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		free_rpc_nvmf_ns_get_kv_exec_allowlist(&req);
+		return;
+	}
+
+	subsystem = _rpc_nvmf_get_subsystem(request, req.tgt_name, req.nqn, NULL);
+	if (!subsystem) {
+		free_rpc_nvmf_ns_get_kv_exec_allowlist(&req);
+		return;
+	}
+
+	rc = spdk_nvmf_ns_get_kv_exec_allowlist(subsystem, req.nsid, &entries, &count);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		free_rpc_nvmf_ns_get_kv_exec_allowlist(&req);
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_array_begin(w);
+	for (i = 0; i < count; i++) {
+		spdk_json_write_object_begin(w);
+		spdk_json_write_named_uint32(w, "op_id", entries[i].op_id);
+		if (entries[i].binding != NULL) {
+			spdk_json_write_named_string(w, "binding", entries[i].binding);
+		}
+		spdk_json_write_object_end(w);
+	}
+	spdk_json_write_array_end(w);
+	spdk_jsonrpc_end_result(request, w);
+
+	free_rpc_nvmf_ns_get_kv_exec_allowlist(&req);
+}
+SPDK_RPC_REGISTER("nvmf_ns_get_kv_exec_allowlist", rpc_nvmf_ns_get_kv_exec_allowlist,
+		  SPDK_RPC_RUNTIME)
+
 static void
 nvmf_rpc_anagrpid_resumed(struct spdk_nvmf_subsystem *subsystem,
 			  void *cb_arg, int status)

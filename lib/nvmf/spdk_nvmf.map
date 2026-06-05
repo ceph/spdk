@@ -38,6 +38,8 @@
 	spdk_nvmf_subsystem_get_next;
 	spdk_nvmf_ns_add_host;
 	spdk_nvmf_ns_remove_host;
+	spdk_nvmf_ns_set_kv_exec_allowlist;
+	spdk_nvmf_ns_get_kv_exec_allowlist;
 	spdk_nvmf_subsystem_add_host;
 	spdk_nvmf_subsystem_add_host_ext;
 	spdk_nvmf_subsystem_remove_host;

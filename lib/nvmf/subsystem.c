@@ -2275,6 +2275,7 @@ spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t ns
 	free(ns->ptpl_file);
 	free(ns->preempt_abort);
 	nvmf_ns_reservation_clear_all_registrants(ns);
+	nvmf_ns_kv_exec_allowlist_free(ns);
 	if (ns->csi == SPDK_NVME_CSI_KV) {
 		/* Key-Value namespace: release the kvdev descriptor instead of a bdev. */
 		if (ns->kvdev_desc) {
@@ -2913,6 +2914,112 @@ err:
 	subsystem->ana_group[ns->anagrpid - 1]--;
 	spdk_kvdev_close(ns->kvdev_desc);
 	free(ns);
+
+	return 0;
+}
+
+void
+nvmf_ns_kv_exec_allowlist_free(struct spdk_nvmf_ns *ns)
+{
+	uint32_t i;
+
+	for (i = 0; i < ns->kv_exec_allowlist_count; i++) {
+		free(ns->kv_exec_allowlist[i].binding);
+	}
+	free(ns->kv_exec_allowlist);
+	ns->kv_exec_allowlist = NULL;
+	ns->kv_exec_allowlist_count = 0;
+}
+
+bool
+nvmf_ns_kv_exec_op_allowed(const struct spdk_nvmf_ns *ns, uint32_t op_id,
+			   const char **binding_out)
+{
+	uint32_t i;
+
+	for (i = 0; i < ns->kv_exec_allowlist_count; i++) {
+		if (ns->kv_exec_allowlist[i].op_id == op_id) {
+			if (binding_out != NULL) {
+				*binding_out = ns->kv_exec_allowlist[i].binding;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+int
+spdk_nvmf_ns_set_kv_exec_allowlist(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid,
+				   const struct spdk_nvmf_kv_exec_allow *entries, uint32_t count)
+{
+	struct spdk_nvmf_ns *ns;
+	struct spdk_nvmf_kv_exec_allow_entry *list = NULL;
+	uint32_t i;
+
+	ns = _nvmf_subsystem_get_ns(subsystem, nsid);
+	if (ns == NULL) {
+		return -ENODEV;
+	}
+	if (ns->csi != SPDK_NVME_CSI_KV) {
+		SPDK_ERRLOG("nsid %" PRIu32 " of subsystem %s is not a Key-Value namespace\n",
+			    nsid, subsystem->subnqn);
+		return -EINVAL;
+	}
+
+	if (count > 0) {
+		list = calloc(count, sizeof(*list));
+		if (list == NULL) {
+			return -ENOMEM;
+		}
+		for (i = 0; i < count; i++) {
+			list[i].op_id = entries[i].op_id;
+			if (entries[i].binding != NULL) {
+				list[i].binding = strdup(entries[i].binding);
+				if (list[i].binding == NULL) {
+					while (i-- > 0) {
+						free(list[i].binding);
+					}
+					free(list);
+					return -ENOMEM;
+				}
+			}
+		}
+	}
+
+	/* Replace the whole allowlist atomically once the new copy is built. */
+	nvmf_ns_kv_exec_allowlist_free(ns);
+	ns->kv_exec_allowlist = list;
+	ns->kv_exec_allowlist_count = count;
+
+	return 0;
+}
+
+int
+spdk_nvmf_ns_get_kv_exec_allowlist(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid,
+				   const struct spdk_nvmf_kv_exec_allow **entries, uint32_t *count)
+{
+	struct spdk_nvmf_ns *ns;
+
+	/* The internal and public entry structs are deliberately layout-identical
+	 * (op_id + pointer), so the internal array can be exposed directly as the
+	 * read-only public view without an allocation/copy. */
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_kv_exec_allow_entry) ==
+			   sizeof(struct spdk_nvmf_kv_exec_allow), "layout mismatch");
+	SPDK_STATIC_ASSERT(offsetof(struct spdk_nvmf_kv_exec_allow_entry, op_id) ==
+			   offsetof(struct spdk_nvmf_kv_exec_allow, op_id), "layout mismatch");
+	SPDK_STATIC_ASSERT(offsetof(struct spdk_nvmf_kv_exec_allow_entry, binding) ==
+			   offsetof(struct spdk_nvmf_kv_exec_allow, binding), "layout mismatch");
+
+	ns = _nvmf_subsystem_get_ns(subsystem, nsid);
+	if (ns == NULL) {
+		return -ENODEV;
+	}
+	if (ns->csi != SPDK_NVME_CSI_KV) {
+		return -EINVAL;
+	}
+
+	*entries = (const struct spdk_nvmf_kv_exec_allow *)ns->kv_exec_allowlist;
+	*count = ns->kv_exec_allowlist_count;
 
 	return 0;
 }

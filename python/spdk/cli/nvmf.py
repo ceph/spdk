@@ -429,6 +429,43 @@ def add_parser(subparsers):
     nvmf_ns_visible_add_args(p)
     p.set_defaults(func=nvmf_ns_remove_host)
 
+    def nvmf_ns_set_kv_exec_allowlist(args):
+        allowlist = []
+        for u in args.allowlist:
+            fields = u.split(':', 1)
+            entry = {"op_id": int(fields[0])}
+            if len(fields) > 1 and fields[1] != "":
+                entry["binding"] = fields[1]
+            allowlist.append(entry)
+        args.client.nvmf_ns_set_kv_exec_allowlist(
+                                    nqn=args.nqn,
+                                    nsid=args.nsid,
+                                    allowlist=allowlist,
+                                    tgt_name=args.tgt_name)
+
+    p = subparsers.add_parser('nvmf_ns_set_kv_exec_allowlist',
+                              help='Replace the KV Exec allowlist of a namespace (ADR-0005)')
+    p.add_argument('nqn', help='Subsystem NQN')
+    p.add_argument('nsid', help='Namespace ID', type=int)
+    p.add_argument('allowlist', type=partial(str.split, sep=' '), default=[],
+                   help="Whitespace-separated KV Exec allowlist entries, each 'op_id' or "
+                   "'op_id:binding' (e.g. '1 2:cls.method'). Pass an empty string to clear.")
+    p.add_argument('-t', '--tgt-name', help='Parent NVMe-oF target name', type=str)
+    p.set_defaults(func=nvmf_ns_set_kv_exec_allowlist)
+
+    def nvmf_ns_get_kv_exec_allowlist(args):
+        print_dict(args.client.nvmf_ns_get_kv_exec_allowlist(
+                                    nqn=args.nqn,
+                                    nsid=args.nsid,
+                                    tgt_name=args.tgt_name))
+
+    p = subparsers.add_parser('nvmf_ns_get_kv_exec_allowlist',
+                              help='Get the KV Exec allowlist of a namespace (ADR-0005)')
+    p.add_argument('nqn', help='Subsystem NQN')
+    p.add_argument('nsid', help='Namespace ID', type=int)
+    p.add_argument('-t', '--tgt-name', help='Parent NVMe-oF target name', type=str)
+    p.set_defaults(func=nvmf_ns_get_kv_exec_allowlist)
+
     def nvmf_subsystem_add_host(args):
         args.client.nvmf_subsystem_add_host(
                                          nqn=args.nqn,
