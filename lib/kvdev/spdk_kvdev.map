@@ -1,0 +1,21 @@
+{
+	global:
+	spdk_kvdev_module_list_add;
+	spdk_kvdev_initialize;
+	spdk_kvdev_finish;
+	spdk_kvdev_register;
+	spdk_kvdev_unregister;
+	spdk_kvdev_get_by_name;
+	spdk_kvdev_first;
+	spdk_kvdev_next;
+	spdk_kvdev_open;
+	spdk_kvdev_close;
+	spdk_kvdev_desc_get_kvdev;
+	spdk_kvdev_get_name;
+	spdk_kvdev_get_caps;
+	spdk_kvdev_get_io_channel;
+	spdk_kvdev_store;
+	spdk_kvdev_retrieve;
+
+	local: *;
+};
