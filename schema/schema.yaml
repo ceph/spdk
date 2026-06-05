@@ -463,6 +463,15 @@ objects:
         type: array
         class: scsi_luns
         description: array of objects describing @ref rpc_vhost_get_controllers_scsi_luns
+  - name: nvmf_kv_exec_allow
+    fields:
+      - name: op_id
+        type: uint32
+        required: true
+        description: Permitted KV Exec operation ID (ADR-0005)
+      - name: binding
+        type: string
+        description: Optional opaque binding descriptor the backend interprets
 return_objects:
   - name: framework_monitor_context_switch_result
     fields:
@@ -692,6 +701,10 @@ return_arrays:
   - name: notification_types
     item_type: string
 arrays:
+  - name: nvmf_kv_exec_allowlist
+    item_type: object
+    class: nvmf_kv_exec_allow
+    max_count: 256
   - name: bdev_histogram_borders
     item_type: uint64
     max_count: 256
@@ -4194,6 +4207,48 @@ methods:
         type: string
         required: true
         description: Host NQN
+      - name: tgt_name
+        type: string
+        description: Parent NVMe-oF target name
+  - name: nvmf_ns_set_kv_exec_allowlist
+    description: |
+      Replace the KV Exec allowlist of a namespace (ADR-0005)
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: nqn
+        type: string
+        required: true
+        description: Subsystem NQN
+      - name: nsid
+        type: uint32
+        required: true
+        description: Namespace ID
+      - name: allowlist
+        type: array
+        class: nvmf_kv_exec_allowlist
+        required: true
+        description: Whitespace-separated KV Exec allowlist entries, each 'op_id' or 'op_id:binding' (e.g. '1 2:cls.method'). Pass an empty string to clear.
+      - name: tgt_name
+        type: string
+        description: Parent NVMe-oF target name
+  - name: nvmf_ns_get_kv_exec_allowlist
+    description: |
+      Get the KV Exec allowlist of a namespace (ADR-0005)
+    result:
+      type: object
+      class: nvmf_kv_exec_allow
+      description: The KV Exec allowlist of the namespace
+    params:
+      - name: nqn
+        type: string
+        required: true
+        description: Subsystem NQN
+      - name: nsid
+        type: uint32
+        required: true
+        description: Namespace ID
       - name: tgt_name
         type: string
         description: Parent NVMe-oF target name

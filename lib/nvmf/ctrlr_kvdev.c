@@ -394,6 +394,22 @@ nvmf_kvdev_ctrlr_process_io_cmd(struct spdk_nvmf_ns *ns, struct spdk_io_channel 
 		uint32_t output_len = cmd->cdw12_bits.kv_exec.osize;
 		uint32_t op_id = cmd->cdw13_bits.kv_exec.op_id;
 
+		/*
+		 * Per-namespace KV Exec allowlist enforcement (ADR-0005). The trust
+		 * decision is per (subsystem, nsid): an op-ID not in this namespace's
+		 * allowlist is rejected here, BEFORE the backend exec op runs
+		 * (default-deny). Reject with INVALID_OPCODE — the same status the data
+		 * path already uses for an unsupported/absent KV Exec operation.
+		 */
+		if (!nvmf_ns_kv_exec_op_allowed(ns, op_id, NULL)) {
+			SPDK_DEBUGLOG(nvmf, "KV Exec op_id %u not in nsid %u allowlist; rejecting\n",
+				      op_id, ns->nsid);
+			free(kv_req);
+			rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+			rsp->status.sc = SPDK_NVME_SC_INVALID_OPCODE;
+			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+		}
+
 		/* The output the device may write back is bounded by the host data
 		 * buffer; clamp the advertised output size and use it as the
 		 * scatter-back bound in nvmf_kvdev_exec_done(). */

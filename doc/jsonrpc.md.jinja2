@@ -7143,6 +7143,67 @@ Example response:
 }
 ~~~
 
+### nvmf_ns_set_kv_exec_allowlist {#rpc_nvmf_ns_set_kv_exec_allowlist}
+
+{{ nvmf_ns_set_kv_exec_allowlist_description }}
+
+#### Parameters
+
+{{ nvmf_ns_set_kv_exec_allowlist_params }}
+
+#### Response
+
+{{ nvmf_ns_set_kv_exec_allowlist_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_ns_set_kv_exec_allowlist", "nqn.2016-06.io.spdk:cnode1", "2", "") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### nvmf_ns_get_kv_exec_allowlist {#rpc_nvmf_ns_get_kv_exec_allowlist}
+
+{{ nvmf_ns_get_kv_exec_allowlist_description }}
+
+#### Parameters
+
+{{ nvmf_ns_get_kv_exec_allowlist_params }}
+
+#### Response
+
+{{ nvmf_ns_get_kv_exec_allowlist_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("nvmf_ns_get_kv_exec_allowlist", "nqn.2016-06.io.spdk:cnode1", "2") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "op_id": 34,
+      "binding": "Junk"
+    }
+  ]
+}
+~~~
+
 ### nvmf_set_max_subsystems {#rpc_nvmf_set_max_subsystems}
 
 {{ nvmf_set_max_subsystems_description }}
