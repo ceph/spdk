@@ -77,8 +77,10 @@ strings never name the class/method directly.
 _Avoid_: opcode (that's the NVMe opcode), method id.
 
 **Allowlist**:
-The set of permitted [Op-ID] → (object class, method) bindings the target will execute.
-The trust boundary for [KV Exec]; managed by the [Control sidecar].
+The **per-namespace** set of permitted [Op-ID] → (object class, method) bindings the
+target will execute. Scoped to one [KV namespace] (the same op-ID may bind differently
+in another namespace), matching the [Rados namespace] tenancy boundary. The trust
+boundary for [KV Exec]; managed by the [Control sidecar], keyed by (subsystem, namespace).
 _Avoid_: whitelist, ACL.
 
 **Control sidecar**:
