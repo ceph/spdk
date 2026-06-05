@@ -25,6 +25,12 @@ vendor TTL ([0003](0003-vendor-ttl-extension-to-kv-store.md)).
   (op-ID → cls/method/policy) and applies it to the SPDK target via SPDK's existing
   JSON-RPC. gRPC (C++/protobuf) is kept out of the SPDK target core; control plane stays
   privileged and separate from the data plane.
+- **Scope: per-namespace.** The allowlist (and therefore the op-ID → cls/method table) is
+  scoped to a single KV namespace, not global. This matches the tenancy model — each KV
+  namespace is its own rados namespace ([0004](0004-subsystem-to-pool-namespace-to-rados-namespace.md)),
+  so a namespace's allowlist governs exactly the cls operations permitted on its own
+  objects. The same op-ID may map to different (class, method) bindings in different
+  namespaces, and the sidecar's get/set is keyed by (subsystem, namespace).
 
 ## Why these choices
 
