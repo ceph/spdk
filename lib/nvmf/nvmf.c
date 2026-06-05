@@ -1838,6 +1838,22 @@ poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
 		ns_info = &sgroup->ns_info[i];
 		ch = ns_info->channel;
 
+		/* Key-Value namespaces are backed by a kvdev, not a bdev, and use a
+		 * kvdev io_channel. Handle their channel lifecycle separately. */
+		if (ns != NULL && ns->csi == SPDK_NVME_CSI_KV) {
+			if (ch == NULL) {
+				ns_changed = true;
+				ch = spdk_kvdev_get_io_channel(ns->kvdev_desc);
+				if (ch == NULL) {
+					SPDK_ERRLOG("Could not allocate KV I/O channel.\n");
+					return -ENOMEM;
+				}
+				ns_info->channel = ch;
+			}
+			ns_info->anagrpid = ns->anagrpid;
+			continue;
+		}
+
 		if (ns == NULL && ch == NULL) {
 			/* Both NULL. Leave empty */
 		} else if (ns == NULL && ch != NULL) {
