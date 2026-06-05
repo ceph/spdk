@@ -141,14 +141,18 @@ main(int argc, char **argv)
 	int rc = 1;
 	int sc;
 	bool exec_reject;
+	bool exec_rados;
 
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <vfio-user-socket-path> [reject|allow]\n", argv[0]);
+		fprintf(stderr, "Usage: %s <vfio-user-socket-path> [reject|allow|rados-exec]\n", argv[0]);
 		return 1;
 	}
 	/* KV Exec allowlist phase (ADR-0005): "reject" => expect default-deny,
-	 * anything else (default) => op-IDs are allowlisted and exec must succeed. */
+	 * "rados-exec" => exercise the librados backend's KV Exec -> rados_aio_exec
+	 * path (KVX-3) against the OSD-side kvtest cls, anything else (default) =>
+	 * the in-memory op-IDs are allowlisted and exec must succeed. */
 	exec_reject = (argc > 2 && strcmp(argv[2], "reject") == 0);
+	exec_rados = (argc > 2 && strcmp(argv[2], "rados-exec") == 0);
 
 	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
@@ -234,6 +238,75 @@ main(int argc, char **argv)
 	}
 	fprintf(stderr, "KV Store OK (key='%s', %zu value bytes, ttl=%u)\n",
 		g_key, sizeof(g_value), (unsigned)KV_TEST_TTL_SECONDS);
+
+	/*
+	 * KVX-3 rados exec e2e. The librados backend maps KV Exec to rados_aio_exec,
+	 * running an OSD-side object class. The target's allowlist must map:
+	 *   op_id 1 -> binding "kvtest:echo"   (returns the input unchanged)
+	 *   op_id 2 -> binding "kvtest:upcase" (uppercases the stored object value)
+	 * We just stored g_value under g_key; verify both cls methods round-trip
+	 * through the OSD. This proves the cls actually ran server-side.
+	 */
+	if (exec_rados) {
+		const char echo_in[] = "near-data-compute";
+		char *exec_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+		char upper[sizeof(g_value)];
+		size_t j;
+
+		if (exec_buf == NULL) {
+			fprintf(stderr, "Failed to allocate exec DMA buffer\n");
+			rc = 1;
+			goto free_qpair;
+		}
+
+		/* op_id 1 == kvtest:echo: input echoed straight back from the OSD. */
+		memcpy(exec_buf, echo_in, sizeof(echo_in));
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       1 /* kvtest:echo */, exec_buf, sizeof(echo_in),
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Exec rados echo failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (memcmp(exec_buf, echo_in, sizeof(echo_in)) != 0) {
+			fprintf(stderr, "KV Exec rados echo MISMATCH: got '%s'\n", exec_buf);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV Exec rados ECHO OK: OSD cls echoed '%s'\n", exec_buf);
+
+		/* op_id 2 == kvtest:upcase: the OSD reads g_key's stored value
+		 * (g_value, sizeof(g_value) bytes incl. NUL) and returns it uppercased. */
+		for (j = 0; j < sizeof(g_value); j++) {
+			upper[j] = (char)toupper((unsigned char)g_value[j]);
+		}
+		memset(exec_buf, 0, buf_len);
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       2 /* kvtest:upcase */, exec_buf, 0,
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Exec rados upcase failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (memcmp(exec_buf, upper, sizeof(g_value)) != 0) {
+			fprintf(stderr, "KV Exec rados upcase MISMATCH:\n  got: '%s'\n  exp: '%s'\n",
+				exec_buf, upper);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV Exec rados UPCASE OK: OSD cls returned '%s'\n", exec_buf);
+
+		spdk_dma_free(exec_buf);
+		fprintf(stderr, "PASS: KV Exec rados e2e (OSD-side kvtest cls ran)\n");
+		rc = 0;
+		goto free_qpair;
+	}
 
 	/* Retrieve. */
 	rc = spdk_nvme_kv_retrieve(ctx.ns, ctx.qpair, g_key, strlen(g_key),

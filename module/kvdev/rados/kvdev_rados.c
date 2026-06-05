@@ -83,6 +83,7 @@ enum kvdev_rados_op {
 	KVDEV_RADOS_OP_RETRIEVE,
 	KVDEV_RADOS_OP_DELETE,
 	KVDEV_RADOS_OP_EXIST,
+	KVDEV_RADOS_OP_EXEC,
 };
 
 /* One in-flight librados aio. Lives on the channel inflight list until the
@@ -96,7 +97,7 @@ struct kvdev_rados_io {
 	time_t				stat_mtime;	/* EXIST scratch */
 	size_t				bytes_read;	/* RETRIEVE: read_op_read out */
 	int				read_rval;	/* RETRIEVE: read_op_read rc */
-	uint32_t			buf_len;	/* RETRIEVE: caller buf size */
+	uint32_t			buf_len;	/* RETRIEVE/EXEC: caller buf size */
 	spdk_kvdev_io_completion_cb	cb_fn;
 	void				*cb_arg;
 	TAILQ_ENTRY(kvdev_rados_io)	link;
@@ -506,6 +507,17 @@ kvdev_rados_xlate_status(enum kvdev_rados_op op, int ret)
 	case -ENOSPC:
 	case -EDQUOT:
 		return SPDK_KVDEV_IO_STATUS_NOMEM;
+	case -EOPNOTSUPP:
+	case -ENOSYS:
+		/* KV Exec: the OSD has no such object class, or the class has no
+		 * such method (rados returns -EOPNOTSUPP for an unregistered
+		 * class/method). Surface NOT_SUPPORTED so the NVMf layer maps it to
+		 * an NVMe not-supported/invalid-opcode status rather than a generic
+		 * failure. (-ENOSYS is treated the same for older OSDs.) */
+		if (op == KVDEV_RADOS_OP_EXEC) {
+			return SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED;
+		}
+		return SPDK_KVDEV_IO_STATUS_FAILED;
 	default:
 		return SPDK_KVDEV_IO_STATUS_FAILED;
 	}
@@ -542,6 +554,23 @@ kvdev_rados_io_finish(struct kvdev_rados_io *io)
 		}
 	} else if (io->op == KVDEV_RADOS_OP_EXIST && ret >= 0) {
 		status = SPDK_KVDEV_IO_STATUS_SUCCESS;
+	} else if (io->op == KVDEV_RADOS_OP_EXEC && ret >= 0) {
+		/*
+		 * rados_aio_exec returns the number of output bytes the cls method
+		 * produced and copied into the caller buffer. Unlike Retrieve (which
+		 * pairs a stat sub-op to learn the TRUE length), rados gives no way to
+		 * recover the full output length when the cls output exceeds the host
+		 * buffer: librados copies at most out_len bytes and the return value is
+		 * that copied count. So we report the bytes returned as value_len and
+		 * flag BUFFER_TOO_SMALL only when the output exactly filled the buffer
+		 * (a possible truncation). The host's buffer should be sized to the
+		 * advertised op output; this is the documented rados-backend contract. */
+		value_len = (uint32_t)ret;
+		if ((uint32_t)ret >= io->buf_len && io->buf_len > 0) {
+			status = SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL;
+		} else {
+			status = SPDK_KVDEV_IO_STATUS_SUCCESS;
+		}
 	}
 
 	io->cb_fn(io->cb_arg, status, value_len);
@@ -806,6 +835,89 @@ kvdev_rados_exist(struct spdk_io_channel *_ch, const void *key, uint8_t key_len,
 }
 
 /*
+ * KV Exec (ADR-0005): map an allowlisted op to a rados object-class method.
+ *
+ * The (class, method) is NOT on the data path: the NVMf layer resolves the
+ * data-plane op_id against the per-namespace allowlist (KVX-2) and passes the
+ * matching entry's opaque binding through to us. We parse the binding as
+ * "class:method" (the format this backend defines): everything before the first
+ * ':' is the rados object-class name, everything after is the method. A binding
+ * that is NULL, empty, missing the ':', or with an empty class/method is
+ * rejected INVALID before any rados call. op_id itself is not interpreted here
+ * (it only selected the binding upstream).
+ *
+ * The cls runs server-side on the OSD owning oid = hex(key) via rados_aio_exec;
+ * the harvest/poller pattern is identical to the other ops (we never touch SPDK
+ * state from a librados thread). The method's output is bounded by the host
+ * buffer (output_buf_len); see kvdev_rados_io_finish for the truncation contract.
+ */
+static int
+kvdev_rados_exec(struct spdk_io_channel *_ch, const void *key, uint8_t key_len,
+		 uint32_t op_id, const char *binding,
+		 const void *input, uint32_t input_len,
+		 void *output_buf, uint32_t output_buf_len,
+		 spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_rados_io_channel *ch = spdk_io_channel_get_ctx(_ch);
+	struct kvdev_rados *rdev = ch->rdev;
+	struct kvdev_rados_io *io;
+	char oid[KVDEV_RADOS_OID_MAX];
+	char cls[256];
+	const char *colon, *method;
+	size_t cls_len;
+	int rc;
+
+	(void)op_id;
+
+	/* Parse the binding "class:method". Reject anything malformed. */
+	if (binding == NULL || (colon = strchr(binding, ':')) == NULL) {
+		SPDK_ERRLOG("KV Exec: binding '%s' is not 'class:method'\n",
+			    binding ? binding : "(null)");
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_INVALID, 0);
+		return 0;
+	}
+	cls_len = (size_t)(colon - binding);
+	method = colon + 1;
+	if (cls_len == 0 || cls_len >= sizeof(cls) || method[0] == '\0') {
+		SPDK_ERRLOG("KV Exec: binding '%s' has empty/oversized class or method\n",
+			    binding);
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_INVALID, 0);
+		return 0;
+	}
+	memcpy(cls, binding, cls_len);
+	cls[cls_len] = '\0';
+
+	kvdev_rados_key_to_oid(key, key_len, oid);
+
+	io = kvdev_rados_io_alloc(ch, KVDEV_RADOS_OP_EXEC, cb_fn, cb_arg);
+	if (io == NULL) {
+		cb_fn(cb_arg, SPDK_KVDEV_IO_STATUS_NOMEM, 0);
+		return 0;
+	}
+	io->buf_len = output_buf_len;
+
+	/*
+	 * rados_aio_exec runs cls::method on the OSD owning oid, feeding it the
+	 * input blob and copying up to output_buf_len bytes of its output into
+	 * output_buf. The completion return value carries the output byte count
+	 * (or a negative errno: -ENOENT object missing -> KEY_NOT_EXIST,
+	 * -EOPNOTSUPP unknown class/method -> NOT_SUPPORTED; see xlate_status).
+	 */
+	rc = rados_aio_exec(rdev->io_ctx, oid, io->comp, cls, method,
+			    (const char *)input, input_len,
+			    (char *)output_buf, output_buf_len);
+	if (rc < 0) {
+		rados_aio_release(io->comp);
+		free(io);
+		cb_fn(cb_arg, kvdev_rados_xlate_status(KVDEV_RADOS_OP_EXEC, rc), 0);
+		return 0;
+	}
+
+	TAILQ_INSERT_TAIL(&ch->inflight, io, link);
+	return 0;
+}
+
+/*
  * List is deferred for the rados backend (ADR-0002): rados object enumeration is
  * an unordered cursor that cannot seek to a spec start-key, so spec-conformant
  * paginated List is out of scope for this slice. Report command-not-supported.
@@ -902,6 +1014,7 @@ static const struct spdk_kvdev_fn_table kvdev_rados_fn_table = {
 	.del		= kvdev_rados_op_delete,
 	.exist		= kvdev_rados_exist,
 	.list		= kvdev_rados_list,
+	.exec		= kvdev_rados_exec,
 };
 
 /*
