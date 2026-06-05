@@ -103,6 +103,7 @@ def lint_c_code(schema: Dict[str, Any]) -> None:
         "bdev_rbd_create",
         "bdev_rbd_register_cluster",
         "nvmf_set_config",
+        "kvdev_rados_register_cluster",
     }
     manual_decoder_names = {f"rpc_{name}_decoders_manual" for name in manual_decoders}
     c_code_methods = dict()

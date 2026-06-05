@@ -137,6 +137,11 @@ nvmf_kvdev_complete(struct nvmf_kvdev_request *kv_req, int kvstatus, uint32_t va
 	case SPDK_KVDEV_IO_STATUS_NOMEM:
 		rsp->status.sc = SPDK_NVME_SC_CAPACITY_EXCEEDED;
 		break;
+	case SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED:
+		/* Backend does not support this op (e.g. librados List, ADR-0002):
+		 * report NVMe command-not-supported (Invalid Command Opcode). */
+		rsp->status.sc = SPDK_NVME_SC_INVALID_OPCODE;
+		break;
 	case SPDK_KVDEV_IO_STATUS_FAILED:
 	default:
 		rsp->status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
