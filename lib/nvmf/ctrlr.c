@@ -55,6 +55,8 @@ static struct spdk_nvmf_custom_admin_cmd g_nvmf_custom_admin_cmd_hdlrs[SPDK_NVME
 static void _nvmf_request_complete(void *ctx);
 int nvmf_passthru_admin_cmd_for_ctrlr(struct spdk_nvmf_request *req, struct spdk_nvmf_ctrlr *ctrlr);
 static int nvmf_passthru_admin_cmd(struct spdk_nvmf_request *req);
+static void
+spdk_handle_remove_req_from_outstanding_q(struct spdk_nvmf_qpair *qpair);
 
 static inline void
 nvmf_invalid_connect_response(struct spdk_nvmf_fabric_connect_rsp *rsp,
@@ -157,6 +159,16 @@ nvmf_ctrlr_disconnect_io_qpairs_on_pg(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, _nvmf_ctrlr_disconnect_qpairs_on_pg(i, false));
 }
 
+static inline uint64_t
+get_monotonic_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+#define IO_STALE_NS (15ULL * 1000000000ULL)
+
 static int
 nvmf_ctrlr_keep_alive_poll(void *ctx)
 {
@@ -164,13 +176,32 @@ nvmf_ctrlr_keep_alive_poll(void *ctx)
 	uint64_t now = spdk_get_ticks();
 	struct spdk_nvmf_ctrlr *ctrlr = ctx;
 	struct spdk_notify_event kato_event;
-
+	struct spdk_nvmf_qpair	*qpair;
 	if (ctrlr->in_destruct) {
 		nvmf_ctrlr_stop_keep_alive_timer(ctrlr);
 		return SPDK_POLLER_IDLE;
 	}
 
 	SPDK_DEBUGLOG(nvmf, "Polling ctrlr keep alive timeout\n");
+
+	uint64_t now_ns = get_monotonic_ns();
+
+	/* iterate controller's qpairs; adapt to your ctrlr->qp list */
+	TAILQ_FOREACH(qpair, &ctrlr->qpair_head, qpair_link) {
+		if (qpair->qid == 0) { /* skip AENs */
+			continue;
+		}
+		uint64_t head_ts = atomic_load_explicit(&qpair->published_head_ts_ns, memory_order_acquire);
+		if (head_ts == UINT64_MAX) {
+			continue; /* no outstanding IO */
+		}
+		if (now_ns - head_ts >= IO_STALE_NS) {
+			SPDK_WARNLOG("ctrlr %d qid %u: oldest outstanding IO %" PRIu64 " ms ago (submit_ts=%" PRIu64 ")\n",
+				ctrlr->cntlid, qpair->qid, (now_ns - head_ts)/1000000, head_ts);
+			//spdk_app_stop(1);
+			return SPDK_POLLER_IDLE;
+		}
+	}
 
 	/* If the Keep alive feature is in use and the timer expires */
 	keep_alive_timeout_tick = ctrlr->last_keep_alive_tick +
@@ -321,6 +352,7 @@ nvmf_ctrlr_add_qpair(struct spdk_nvmf_qpair *qpair,
 				 ctrlr->hostnqn);
 	nvmf_qpair_set_ctrlr(qpair, ctrlr);
 	spdk_bit_array_set(ctrlr->qpair_mask, qpair->qid);
+	TAILQ_INSERT_TAIL(&ctrlr->qpair_head, qpair, qpair_link);
 	SPDK_DEBUGLOG(nvmf, "qpair_mask set, qid %u\n", qpair->qid);
 
 	spdk_thread_send_msg(qpair->group->thread, nvmf_ctrlr_send_connect_rsp, req);
@@ -471,6 +503,7 @@ nvmf_ctrlr_create(struct spdk_nvmf_subsystem *subsystem,
 
 	STAILQ_INIT(&ctrlr->async_events);
 	TAILQ_INIT(&ctrlr->log_head);
+	TAILQ_INIT(&ctrlr->qpair_head);
 	ctrlr->subsys = subsystem;
 	ctrlr->thread = req->qpair->group->thread;
 	ctrlr->disconnect_in_progress = false;
@@ -2215,7 +2248,7 @@ nvmf_ctrlr_set_features_number_of_queues(struct spdk_nvmf_request *req)
 	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 }
 
-SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_ctrlr) == 4936,
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_ctrlr) == 4952,
 		   "Please check migration fields that need to be added or not");
 
 static void
@@ -5126,7 +5159,7 @@ nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 		response->status.dnr = 1;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
-
+	//qpair->ana_ts_ns[ns->anagrpid] =  req->submit_ts_ns; TODO need to init ana_ts_ns during qp create in nvmf_tcp_qpair_init
 	ana_state = nvmf_ctrlr_get_ana_state(ctrlr, ns->anagrpid);
 	if (spdk_unlikely(ana_state != SPDK_NVME_ANA_OPTIMIZED_STATE &&
 			  ana_state != SPDK_NVME_ANA_NON_OPTIMIZED_STATE)) {
@@ -5253,6 +5286,14 @@ nvmf_qpair_request_cleanup(struct spdk_nvmf_qpair *qpair)
 		}
 	}
 }
+static void
+spdk_handle_remove_req_from_outstanding_q(struct spdk_nvmf_qpair *qpair) {
+ /* publish new head timestamp (or UINT64_MAX if none) */
+	struct spdk_nvmf_request *new_head = TAILQ_FIRST(&qpair->outstanding);
+	uint64_t new_head_ts = new_head ? new_head->submit_ts_ns : UINT64_MAX;
+	atomic_store_explicit(&qpair->published_head_ts_ns, new_head_ts, memory_order_release);
+}
+
 
 int
 spdk_nvmf_request_free(struct spdk_nvmf_request *req)
@@ -5260,6 +5301,7 @@ spdk_nvmf_request_free(struct spdk_nvmf_request *req)
 	struct spdk_nvmf_qpair *qpair = req->qpair;
 
 	TAILQ_REMOVE(&qpair->outstanding, req, link);
+	spdk_handle_remove_req_from_outstanding_q(qpair);
 	nvmf_transport_req_free(req);
 
 	nvmf_qpair_request_cleanup(qpair);
@@ -5348,11 +5390,13 @@ _nvmf_request_complete(void *ctx)
 	switch (req->zcopy_phase) {
 	case NVMF_ZCOPY_PHASE_NONE:
 		TAILQ_REMOVE(&qpair->outstanding, req, link);
+		spdk_handle_remove_req_from_outstanding_q(qpair);
 		break;
 	case NVMF_ZCOPY_PHASE_INIT:
 		if (spdk_unlikely(spdk_nvme_cpl_is_error(rsp))) {
 			req->zcopy_phase = NVMF_ZCOPY_PHASE_INIT_FAILED;
 			TAILQ_REMOVE(&qpair->outstanding, req, link);
+			spdk_handle_remove_req_from_outstanding_q(qpair);
 		} else {
 			req->zcopy_phase = NVMF_ZCOPY_PHASE_EXECUTE;
 		}
@@ -5361,6 +5405,7 @@ _nvmf_request_complete(void *ctx)
 		break;
 	case NVMF_ZCOPY_PHASE_END_PENDING:
 		TAILQ_REMOVE(&qpair->outstanding, req, link);
+		spdk_handle_remove_req_from_outstanding_q(qpair);
 		req->zcopy_phase = NVMF_ZCOPY_PHASE_COMPLETE;
 		break;
 	default:
@@ -5573,6 +5618,12 @@ spdk_nvmf_request_exec(struct spdk_nvmf_request *req)
 
 	/* Place the request on the outstanding list so we can keep track of it */
 	TAILQ_INSERT_TAIL(&qpair->outstanding, req, link);
+	req->submit_ts_ns = get_monotonic_ns();
+	/* If this is the first outstanding request, publish head ts.
+		TAILQ_FIRST(&qpair->outstanding) is safe here because we are on the QP thread. */
+	if (TAILQ_FIRST(&qpair->outstanding) == req) {
+		atomic_store_explicit(&qpair->published_head_ts_ns, req->submit_ts_ns, memory_order_release);
+	}
 
 	if (spdk_unlikely(req->cmd->nvmf_cmd.opcode == SPDK_NVME_OPC_FABRIC)) {
 		status = nvmf_ctrlr_process_fabrics_cmd(req);

@@ -306,7 +306,7 @@ struct spdk_nvmf_ctrlr {
 	uint64_t log_page_count;
 	uint8_t num_avail_log_pages;
 	TAILQ_HEAD(log_page_head, spdk_nvmf_reservation_log) log_head;
-
+	TAILQ_HEAD(, spdk_nvmf_qpair) qpair_head;
 	/* Time to trigger keep-alive--poller_time = now_tick + period */
 	uint64_t			last_keep_alive_tick;
 	struct spdk_poller		*keep_alive_poller;

@@ -1435,8 +1435,19 @@ _nvmf_ctrlr_free_from_qpair(void *ctx)
 {
 	struct nvmf_qpair_disconnect_ctx *qpair_ctx = ctx;
 	struct spdk_nvmf_ctrlr *ctrlr = qpair_ctx->ctrlr;
+	struct spdk_nvmf_qpair *qpair = qpair_ctx->qpair;
 	uint32_t count;
-
+	/* Remove qpair from controller's qpair list (runs on ctrlr->thread) */
+	if (qpair != NULL) {
+		/* Defensive: only remove if it's linked */
+		if (!TAILQ_EMPTY(&ctrlr->qpair_head)) {
+			TAILQ_REMOVE(&ctrlr->qpair_head, qpair, qpair_link);
+			SPDK_DEBUGLOG(nvmf, "qpair removed from ctrlr list, qid %u\n", qpair->qid);
+			/* Prevent controller from seeing stale head timestamp for this qpair.
+			Publish UINT64_MAX so keep-alive reader ignores it immediately. */
+			atomic_store_explicit(&qpair->published_head_ts_ns, UINT64_MAX, memory_order_release);
+		}
+	}
 	spdk_bit_array_clear(ctrlr->qpair_mask, qpair_ctx->qid);
 	SPDK_DEBUGLOG(nvmf, "qpair_mask cleared, qid %u\n", qpair_ctx->qid);
 	count = spdk_bit_array_count_set(ctrlr->qpair_mask);

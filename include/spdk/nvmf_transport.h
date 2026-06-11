@@ -19,6 +19,7 @@
 #include "spdk/nvmf_spec.h"
 #include "spdk/memory.h"
 #include "spdk/trace.h"
+#include <stdatomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,6 +102,7 @@ struct spdk_nvmf_request {
 	union nvmf_c2h_msg		*rsp;
 	STAILQ_ENTRY(spdk_nvmf_request)	buf_link;
 	TAILQ_ENTRY(spdk_nvmf_request)	link;
+	uint64_t			submit_ts_ns;
 
 	/* Memory domain which describes payload in this request. If the bdev doesn't support memory
 	 * domains, bdev layer will do the necessary push or pull operation. */
@@ -135,7 +137,7 @@ struct spdk_nvmf_request {
 	uint32_t			orig_nsid;
 	STAILQ_ENTRY(spdk_nvmf_request)	reservation_link;
 };
-SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_request) == 840, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_request) == 848, "Incorrect size");
 
 enum spdk_nvmf_qpair_state {
 	SPDK_NVMF_QPAIR_UNINITIALIZED = 0,
@@ -168,6 +170,8 @@ struct spdk_nvmf_qpair {
 
 	TAILQ_HEAD(, spdk_nvmf_request)		outstanding;
 	TAILQ_ENTRY(spdk_nvmf_qpair)		link;
+	TAILQ_ENTRY(spdk_nvmf_qpair)		qpair_link;
+	atomic_uint_fast64_t published_head_ts_ns;
 
 	spdk_nvmf_state_change_done		state_cb;
 	void					*state_cb_arg;
