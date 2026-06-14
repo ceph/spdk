@@ -1523,6 +1523,7 @@ nvmf_tcp_qpair_init(struct spdk_nvmf_qpair *qpair)
 
 	/* Initialise request state queues of the qpair */
 	atomic_store_explicit(&qpair->published_head_ts_ns, UINT64_MAX, memory_order_relaxed);
+
 	TAILQ_INIT(&tqpair->tcp_req_free_queue);
 	TAILQ_INIT(&tqpair->tcp_req_working_queue);
 	SLIST_INIT(&tqpair->tcp_pdu_free_queue);

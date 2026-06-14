@@ -160,14 +160,16 @@ nvmf_ctrlr_disconnect_io_qpairs_on_pg(struct spdk_io_channel_iter *i)
 }
 
 static inline uint64_t
-get_monotonic_ns(void)
+get_monotonic_ms(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+	return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec/1000000ULL;
+
+	//return (spdk_get_ticks() / spdk_get_ticks_hz()) * 1000ULL;
 }
 
-#define IO_STALE_NS (15ULL * 1000000000ULL)
+#define IO_STALE_MS (15ULL * 1000)
 
 static int
 nvmf_ctrlr_keep_alive_poll(void *ctx)
@@ -184,7 +186,7 @@ nvmf_ctrlr_keep_alive_poll(void *ctx)
 
 	SPDK_DEBUGLOG(nvmf, "Polling ctrlr keep alive timeout\n");
 
-	uint64_t now_ns = get_monotonic_ns();
+	uint64_t now_ms = get_monotonic_ms();
 
 	/* iterate controller's qpairs; adapt to your ctrlr->qp list */
 	TAILQ_FOREACH(qpair, &ctrlr->qpair_head, qpair_link) {
@@ -195,9 +197,9 @@ nvmf_ctrlr_keep_alive_poll(void *ctx)
 		if (head_ts == UINT64_MAX) {
 			continue; /* no outstanding IO */
 		}
-		if (now_ns - head_ts >= IO_STALE_NS) {
+		if (now_ms - head_ts >= IO_STALE_MS) {
 			SPDK_WARNLOG("ctrlr %d qid %u: oldest outstanding IO %" PRIu64 " ms ago (submit_ts=%" PRIu64 ")\n",
-				ctrlr->cntlid, qpair->qid, (now_ns - head_ts)/1000000, head_ts);
+				ctrlr->cntlid, qpair->qid, (now_ms - head_ts), head_ts);
 			//spdk_app_stop(1);
 			return SPDK_POLLER_IDLE;
 		}
@@ -5159,7 +5161,10 @@ nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req)
 		response->status.dnr = 1;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
-	//qpair->ana_ts_ns[ns->anagrpid] =  req->submit_ts_ns; TODO need to init ana_ts_ns during qp create in nvmf_tcp_qpair_init
+	if (ns->anagrpid < MAX_ANA_GROUPS && qpair->qid != 0) {
+		/* update the timestamp of the ANA in order to detect stale ANA groups */
+		qpair->group->stat.ana_ts_ns[ns->anagrpid] = req->submit_ts_ns;
+	}
 	ana_state = nvmf_ctrlr_get_ana_state(ctrlr, ns->anagrpid);
 	if (spdk_unlikely(ana_state != SPDK_NVME_ANA_OPTIMIZED_STATE &&
 			  ana_state != SPDK_NVME_ANA_NON_OPTIMIZED_STATE)) {
@@ -5618,7 +5623,7 @@ spdk_nvmf_request_exec(struct spdk_nvmf_request *req)
 
 	/* Place the request on the outstanding list so we can keep track of it */
 	TAILQ_INSERT_TAIL(&qpair->outstanding, req, link);
-	req->submit_ts_ns = get_monotonic_ns();
+	req->submit_ts_ns = get_monotonic_ms();
 	/* If this is the first outstanding request, publish head ts.
 		TAILQ_FIRST(&qpair->outstanding) is safe here because we are on the QP thread. */
 	if (TAILQ_FIRST(&qpair->outstanding) == req) {

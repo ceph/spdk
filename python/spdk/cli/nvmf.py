@@ -526,3 +526,11 @@ def add_parser(subparsers):
                               help='Stop publishing pull registration request through mdns')
     p.add_argument('-t', '--tgt-name', help='The name of the NVMe-oF target (optional)', type=str)
     p.set_defaults(func=nvmf_stop_mdns_prr)
+
+    def nvmf_get_idle_ana_groups(args):
+        print_dict(args.client.nvmf_get_idle_ana_groups(tgt_name=args.tgt_name))
+
+    p = subparsers.add_parser('nvmf_get_idle_ana_groups',
+                              help='Dump the idle ANA groups')
+    p.add_argument('-t', '--tgt-name', help='The name of the NVMe-oF target (optional)', type=str)
+    p.set_defaults(func=nvmf_get_idle_ana_groups)

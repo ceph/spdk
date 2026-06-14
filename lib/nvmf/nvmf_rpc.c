@@ -3714,3 +3714,148 @@ rpc_nvmf_stop_mdns_prr(struct spdk_jsonrpc_request *request,
 	free(req.tgt_name);
 }
 SPDK_RPC_REGISTER("nvmf_stop_mdns_prr", rpc_nvmf_stop_mdns_prr, SPDK_RPC_RUNTIME);
+
+
+#define ANA_IDLE_THRESHOLD_MS (15 * 1000)
+
+struct rpc_nvmf_get_idle_ana_groups_ctx {
+	char *tgt_name;
+	struct spdk_nvmf_tgt *tgt;
+	struct spdk_jsonrpc_request *request;
+	struct spdk_json_write_ctx *w;
+	uint64_t max_ana_ts_ns[MAX_ANA_GROUPS];
+};
+
+static const struct spdk_json_object_decoder rpc_nvmf_get_idle_ana_groups_decoders[] = {
+	{"tgt_name", offsetof(struct rpc_nvmf_get_idle_ana_groups_ctx, tgt_name), spdk_json_decode_string, true},
+};
+
+static void
+free_get_idle_ana_groups_ctx(struct rpc_nvmf_get_idle_ana_groups_ctx *ctx)
+{
+	free(ctx->tgt_name);
+	free(ctx);
+}
+
+static inline uint64_t
+get_monotonic_ms1(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec/1000000ULL;
+	//return (spdk_get_ticks() / spdk_get_ticks_hz()) * 1000ULL;
+}
+
+static void
+rpc_nvmf_get_idle_ana_groups_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct rpc_nvmf_get_idle_ana_groups_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	uint32_t g;
+	uint64_t current_time_ms = get_monotonic_ms1();
+
+	SPDK_DEBUGLOG("rpc done: thread=%p request=%p\n", spdk_get_thread(), ctx->request);
+
+	spdk_json_write_object_begin(ctx->w);
+	spdk_json_write_named_array_begin(ctx->w, "idle_ana_groups");
+
+	for (g = 1; g < MAX_ANA_GROUPS; g++) {
+		uint64_t last_io = ctx->max_ana_ts_ns[g];
+		uint64_t elapsed_ms = 0;
+
+		if (current_time_ms > last_io) {
+			elapsed_ms = current_time_ms - last_io;
+		}
+
+		if (last_io == 0 || elapsed_ms >= ANA_IDLE_THRESHOLD_MS) {
+
+			/* 3. Wrap each group entry in its own object: { "ana_group_id": X } */
+			spdk_json_write_object_begin(ctx->w);
+			spdk_json_write_named_uint32(ctx->w, "ana_group_id", g);
+			spdk_json_write_object_end(ctx->w);
+
+			if (last_io == 0) {
+				SPDK_NOTICELOG("found idle ana %d, no IOs \n",g);
+			} else {
+				SPDK_NOTICELOG("found idle ana %d elapsed %lu sec \n",g, elapsed_ms / 1000);
+			}
+		}
+	}
+	/*  Close array: ] */
+	spdk_json_write_array_end(ctx->w);
+	/*  Close outer object: } */
+	spdk_json_write_object_end(ctx->w);
+
+	spdk_jsonrpc_end_result(ctx->request, ctx->w);
+	free_get_idle_ana_groups_ctx(ctx);
+}
+
+static void
+_rpc_nvmf_get_idle_ana_groups(struct spdk_io_channel_iter *i)
+{
+	struct rpc_nvmf_get_idle_ana_groups_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel *ch;
+	struct spdk_nvmf_poll_group *group;
+	uint32_t g;
+
+	ch = spdk_get_io_channel(ctx->tgt);
+	group = spdk_io_channel_get_ctx(ch);
+
+	/* Safely harvest metrics into context across worker threads without touching JSON contexts */
+	for (g = 1; g < MAX_ANA_GROUPS; g++) {
+		if (group->stat.ana_ts_ns[g] > ctx->max_ana_ts_ns[g]) {
+			ctx->max_ana_ts_ns[g] = group->stat.ana_ts_ns[g];
+		}
+	}
+	spdk_put_io_channel(ch);
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+rpc_nvmf_get_idle_ana_groups(struct spdk_jsonrpc_request *request,
+			     const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_get_idle_ana_groups_ctx *ctx;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Memory allocation error");
+		return;
+	}
+	ctx->request = request;
+
+	if (params) {
+		if (spdk_json_decode_object(params, rpc_nvmf_get_idle_ana_groups_decoders,
+					    SPDK_COUNTOF(rpc_nvmf_get_idle_ana_groups_decoders),
+					    ctx)) {
+			SPDK_ERRLOG("spdk_json_decode_object failed\n");
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+			free_get_idle_ana_groups_ctx(ctx);
+			return;
+		}
+	}
+	ctx->tgt_name = NULL;
+	struct spdk_nvmf_tgt *tgt = NULL;
+
+	tgt = spdk_nvmf_get_tgt(ctx->tgt_name);
+	if (!tgt) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target.");
+		free_get_idle_ana_groups_ctx(ctx);
+		return;
+	}
+	ctx->tgt = tgt;
+	ctx->w = spdk_jsonrpc_begin_result(ctx->request);
+	if (!ctx->w) {
+			SPDK_ERRLOG("Failed to begin JSON RPC result\n");
+			spdk_jsonrpc_send_error_response(ctx->request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "JSON allocation error");
+			free_get_idle_ana_groups_ctx(ctx);
+			return;
+	}
+	spdk_for_each_channel(ctx->tgt,
+			_rpc_nvmf_get_idle_ana_groups,
+			ctx,
+			rpc_nvmf_get_idle_ana_groups_done);
+}
+
+SPDK_RPC_REGISTER("nvmf_get_idle_ana_groups", rpc_nvmf_get_idle_ana_groups, SPDK_RPC_RUNTIME)

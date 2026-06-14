@@ -177,6 +177,8 @@ SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_listen_opts) == 32, "Incorrect size")
  */
 void spdk_nvmf_listen_opts_init(struct spdk_nvmf_listen_opts *opts, size_t opts_size);
 
+#define MAX_ANA_GROUPS 16
+
 struct spdk_nvmf_poll_group_stat {
 	/* cumulative admin qpair count */
 	uint32_t admin_qpairs;
@@ -189,6 +191,7 @@ struct spdk_nvmf_poll_group_stat {
 	uint64_t pending_bdev_io;
 	/* NVMe IO commands completed (excludes admin commands) */
 	uint64_t completed_nvme_io;
+	uint64_t ana_ts_ns[MAX_ANA_GROUPS];
 };
 
 /**
