@@ -136,8 +136,9 @@ struct spdk_thread {
 	struct spdk_ring		*messages;
 	uint8_t				num_pp_handlers;
 	int				msg_fd;
-	SLIST_HEAD(, spdk_msg)		msg_cache;
-	size_t				msg_cache_count;
+	/* Lock-free message pool using SPDK rings (MP/SC) */
+	struct spdk_ring		*msg_pool;		/* Per-thread pool for alloc and free */
+	uint32_t			msg_pool_size;		/* Pool capacity (SPDK_MSG_MEMPOOL_CACHE_SIZE) */
 	spdk_msg_fn			critical_msg;
 	uint64_t			id;
 	uint64_t			next_poller_id;
@@ -399,10 +400,24 @@ static void thread_interrupt_destroy(struct spdk_thread *thread);
 static int thread_interrupt_create(struct spdk_thread *thread);
 
 static void
+thread_drain_msg_ring(struct spdk_ring **ring)
+{
+	struct spdk_msg *msg;
+
+	if (*ring == NULL) {
+		return;
+	}
+	while (spdk_ring_dequeue(*ring, (void **)&msg, 1) == 1) {
+		spdk_mempool_put(g_spdk_msg_mempool, msg);
+	}
+	spdk_ring_free(*ring);
+	*ring = NULL;
+}
+
+static void
 _free_thread(struct spdk_thread *thread)
 {
 	struct spdk_io_channel *ch;
-	struct spdk_msg *msg;
 	struct spdk_poller *poller, *ptmp;
 
 	RB_FOREACH(ch, io_channel_tree, &thread->io_channels) {
@@ -440,18 +455,7 @@ _free_thread(struct spdk_thread *thread)
 	TAILQ_REMOVE(&g_threads, thread, tailq);
 	pthread_mutex_unlock(&g_devlist_mutex);
 
-	msg = SLIST_FIRST(&thread->msg_cache);
-	while (msg != NULL) {
-		SLIST_REMOVE_HEAD(&thread->msg_cache, link);
-
-		assert(thread->msg_cache_count > 0);
-		thread->msg_cache_count--;
-		spdk_mempool_put(g_spdk_msg_mempool, msg);
-
-		msg = SLIST_FIRST(&thread->msg_cache);
-	}
-
-	assert(thread->msg_cache_count == 0);
+	thread_drain_msg_ring(&thread->msg_pool);
 
 	if (spdk_interrupt_mode_is_enabled()) {
 		thread_interrupt_destroy(thread);
@@ -551,8 +555,10 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 	TAILQ_INIT(&thread->active_pollers);
 	RB_INIT(&thread->timed_pollers);
 	TAILQ_INIT(&thread->paused_pollers);
-	SLIST_INIT(&thread->msg_cache);
-	thread->msg_cache_count = 0;
+
+	/* Initialize message pool fields */
+	thread->msg_pool = NULL;
+	thread->msg_pool_size = SPDK_MSG_MEMPOOL_CACHE_SIZE;
 
 	thread->tsc_last = spdk_get_ticks();
 
@@ -568,14 +574,30 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 		return NULL;
 	}
 
-	/* Fill the local message pool cache. */
+	/* Create per-thread message pool (MP/SC: any thread may return messages here) */
+	thread->msg_pool = spdk_ring_create(SPDK_RING_TYPE_MP_SC, SPDK_MSG_MEMPOOL_CACHE_SIZE,
+					    SPDK_ENV_NUMA_ID_ANY);
+	if (!thread->msg_pool) {
+		SPDK_ERRLOG("Unable to allocate memory for message pool ring\n");
+		spdk_ring_free(thread->messages);
+		free(thread);
+		return NULL;
+	}
+
+	/* Pre-populate the local message pool from global mempool */
 	rc = spdk_mempool_get_bulk(g_spdk_msg_mempool, (void **)msgs, SPDK_MSG_MEMPOOL_CACHE_SIZE);
 	if (rc == 0) {
-		/* If we can't populate the cache it's ok. The cache will get filled
-		 * up organically as messages are passed to the thread. */
+		/* Enqueue all messages into the thread-local pool */
 		for (i = 0; i < SPDK_MSG_MEMPOOL_CACHE_SIZE; i++) {
-			SLIST_INSERT_HEAD(&thread->msg_cache, msgs[i], link);
-			thread->msg_cache_count++;
+			rc = spdk_ring_enqueue(thread->msg_pool, (void **)&msgs[i], 1, NULL);
+			if (rc != 1) {
+				SPDK_WARNLOG("Failed to enqueue message %d to pool\n", i);
+				/* Return unused messages to global pool */
+				for (; i < SPDK_MSG_MEMPOOL_CACHE_SIZE; i++) {
+					spdk_mempool_put(g_spdk_msg_mempool, msgs[i]);
+				}
+				break;
+			}
 		}
 	}
 
@@ -853,6 +875,8 @@ spdk_thread_get_from_ctx(void *ctx)
 	return SPDK_CONTAINEROF(ctx, struct spdk_thread, ctx);
 }
 
+static void _thread_free_msg(struct spdk_thread *thread, struct spdk_msg *msg);
+
 static inline uint32_t
 msg_queue_run_batch(struct spdk_thread *thread, uint32_t max_msgs)
 {
@@ -899,14 +923,8 @@ msg_queue_run_batch(struct spdk_thread *thread, uint32_t max_msgs)
 
 		SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
 
-		if (thread->msg_cache_count < SPDK_MSG_MEMPOOL_CACHE_SIZE) {
-			/* Insert the messages at the head. We want to re-use the hot
-			 * ones. */
-			SLIST_INSERT_HEAD(&thread->msg_cache, msg, link);
-			thread->msg_cache_count++;
-		} else {
-			spdk_mempool_put(g_spdk_msg_mempool, msg);
-		}
+		/* Return message to pool */
+		_thread_free_msg(thread, msg);
 	}
 
 	return count;
@@ -1411,6 +1429,26 @@ thread_send_msg_notification(const struct spdk_thread *target_thread)
 		}
 	}
 }
+/**
+ * Free a message back to its originating thread's pool.
+ * MP/SC ring allows any thread to enqueue freed messages directly.
+ */
+static void
+_thread_free_msg(struct spdk_thread *thread, struct spdk_msg *msg)
+{
+	int rc;
+
+	if (thread->msg_pool) {
+		rc = spdk_ring_enqueue(thread->msg_pool, (void **)&msg, 1, NULL);
+		if (rc == 1) {
+			return;
+		}
+	}
+
+	/* SLOW PATH: Return to global pool (rare - only when ring is full) */
+	spdk_mempool_put(g_spdk_msg_mempool, msg);
+}
+
 
 int
 spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx)
@@ -1429,22 +1467,21 @@ spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx
 	local_thread = _get_thread();
 
 	msg = NULL;
-	if (local_thread != NULL) {
-		if (local_thread->msg_cache_count > 0) {
-			msg = SLIST_FIRST(&local_thread->msg_cache);
-			assert(msg != NULL);
-			SLIST_REMOVE_HEAD(&local_thread->msg_cache, link);
-			local_thread->msg_cache_count--;
+	if (local_thread != NULL && local_thread->msg_pool) {
+		/* FAST PATH: Try thread-local pool */
+		if (spdk_ring_dequeue(local_thread->msg_pool, (void **)&msg, 1) == 1) {
+			goto got_msg;
 		}
 	}
 
-	if (msg == NULL) {
-		msg = spdk_mempool_get(g_spdk_msg_mempool);
-		if (!msg) {
-			SPDK_ERRLOG("msg could not be allocated\n");
-			abort();
-		}
+	/* SLOW PATH: Allocate from global pool (rare - only when local pool exhausted) */
+	msg = spdk_mempool_get(g_spdk_msg_mempool);
+	if (!msg) {
+		SPDK_ERRLOG("msg could not be allocated\n");
+		abort();
 	}
+
+got_msg:
 
 	msg->fn = fn;
 	msg->arg = ctx;

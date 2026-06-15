@@ -487,3 +487,53 @@ SPDK_RPC_REGISTER("bdev_rbd_wait_for_latest_osdmap", rpc_bdev_rbd_wait_for_lates
 
 SPDK_RPC_REGISTER("bdev_rbd_get_with_crc32c", rpc_bdev_rbd_get_with_crc32c, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER("bdev_rbd_set_with_crc32c", rpc_bdev_rbd_set_with_crc32c, SPDK_RPC_STARTUP)
+
+/**
+ * RPC function to get the current rbd_with_spdk_wq setting
+ */
+static void
+rpc_bdev_rbd_get_with_spdk_wq(struct spdk_jsonrpc_request *request,
+			      const struct spdk_json_val *params)
+{
+	struct spdk_json_write_ctx *w;
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, bdev_rbd_get_with_spdk_wq());
+	spdk_jsonrpc_end_result(request, w);
+}
+
+/**
+ * RPC function to set the rbd_with_spdk_wq parameter
+ */
+struct rpc_bdev_rbd_set_with_spdk_wq {
+	bool enable;
+};
+
+static const struct spdk_json_object_decoder rpc_bdev_rbd_set_with_spdk_wq_decoders[] = {
+	{"enable", offsetof(struct rpc_bdev_rbd_set_with_spdk_wq, enable), spdk_json_decode_bool},
+};
+
+static void
+rpc_bdev_rbd_set_with_spdk_wq(struct spdk_jsonrpc_request *request,
+			     const struct spdk_json_val *params)
+{
+	struct rpc_bdev_rbd_set_with_spdk_wq req = {};
+	struct spdk_json_write_ctx *w;
+
+	if (spdk_json_decode_object(params, rpc_bdev_rbd_set_with_spdk_wq_decoders,
+				    SPDK_COUNTOF(rpc_bdev_rbd_set_with_spdk_wq_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						"Missing or invalid enable parameter");
+		return;
+	}
+
+	bdev_rbd_set_with_spdk_wq(req.enable);
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, bdev_rbd_get_with_spdk_wq());
+	spdk_jsonrpc_end_result(request, w);
+}
+
+SPDK_RPC_REGISTER("bdev_rbd_get_with_spdk_wq", rpc_bdev_rbd_get_with_spdk_wq, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_rbd_set_with_spdk_wq", rpc_bdev_rbd_set_with_spdk_wq, SPDK_RPC_STARTUP)
