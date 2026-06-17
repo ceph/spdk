@@ -1745,6 +1745,11 @@
           "name": "preferred_unmap_alignment",
           "type": "uint32",
           "description": "Preferred unmap alignment in blocks"
+        },
+        {
+          "name": "fail_io",
+          "type": "boolean",
+          "description": "Fail all IO on this bdev"
         }
       ]
     },
