@@ -40,6 +40,13 @@
 #define NVMF_VFIO_USER_DEFAULT_MAX_IO_SIZE ((NVMF_REQ_MAX_BUFFERS - 1) << SHIFT_4KB)
 #define NVMF_VFIO_USER_DEFAULT_IO_UNIT_SIZE NVMF_VFIO_USER_DEFAULT_MAX_IO_SIZE
 
+/*
+ * vfio-user translates guest memory at this granularity: the NVMe memory page
+ * size (MPS) used when walking PRP lists. Also the size of one PRP list page,
+ * so a list page holds NVMF_VFIO_USER_MPS / sizeof(uint64_t) entries.
+ */
+#define NVMF_VFIO_USER_MPS (1ULL << SHIFT_4KB)
+
 #define NVME_DOORBELLS_OFFSET	0x1000
 #define NVMF_VFIO_USER_SHADOW_DOORBELLS_BUFFER_COUNT 2
 #define NVMF_VFIO_USER_SET_EVENTIDX_MAX_ATTEMPTS 3
@@ -98,8 +105,23 @@ struct nvmf_vfio_user_req;
 
 typedef int (*nvmf_vfio_user_req_cb_fn)(struct nvmf_vfio_user_req *req, void *cb_arg);
 
-/* 1 more for PRP2 list itself */
-#define NVMF_VFIO_USER_MAX_IOVECS	(NVMF_REQ_MAX_BUFFERS + 1)
+/*
+ * Per-request iovec / scatter-gather capacity for vfio-user.
+ *
+ * This bounds every gpa_to_vva mapping a single command makes: the data iovs
+ * (coalesced, returned in req->iov and capped by NVMF_REQ_MAX_BUFFERS) PLUS the
+ * transient MAP_R mappings of the PRP list pages themselves, which accumulate
+ * here while nvme_cmd_map_prps walks a (chained) PRP list and are released when
+ * the request completes. The list pages dominate for large transfers: at 4 KiB
+ * pages a chained list page holds 511 data entries, so an N-byte single IO needs
+ * ~ceil((N/4KiB - 1)/511) list-page mappings + up to NVMF_REQ_MAX_BUFFERS data
+ * runs + 1 (PRP1). 128 thus covers a single IO up to ~128 MiB (~65 list pages +
+ * 33 runs + 1 = ~99), the practical ceiling for the librados backend's 128 MiB
+ * RADOS objects; raising max_io_size beyond that requires growing this. Decoupled
+ * from NVMF_REQ_MAX_BUFFERS (ABI-size-checked via struct spdk_nvmf_ctrlr) so it
+ * can grow freely; it only sizes nvmf_vfio_user_req's own iov[] and sg[] arrays.
+ */
+#define NVMF_VFIO_USER_MAX_IOVECS	128
 
 enum nvmf_vfio_user_req_state {
 	VFIO_USER_REQUEST_STATE_FREE = 0,
@@ -659,6 +681,149 @@ map_one(vfu_ctx_t *ctx, uint64_t addr, uint64_t len, dma_sg_t *sg,
 	return iov->iov_base;
 }
 
+/*
+ * State threaded through a PRP-list walk so a physically-contiguous buffer can be
+ * coalesced into a single data iov even across PRP list-page boundaries. See
+ * nvme_cmd_map_prps() and the helpers below.
+ */
+struct nvme_prp_map {
+	void		*prv;
+	struct iovec	*iovs;		/* data iov output array */
+	uint32_t	iovcnt;		/* data iovs emitted so far */
+	uint32_t	max_iovcnt;	/* capacity of iovs[] */
+	uint64_t	run_base;	/* GPA of the pending coalesced run */
+	uint64_t	run_len;	/* length of the pending coalesced run */
+	bool		have_run;	/* a run is pending */
+	size_t		mps;		/* memory page size (split granularity) */
+	void		*(*gpa_to_vva)(void *prv, uint64_t addr, uint64_t len, uint32_t flags);
+};
+
+/*
+ * Emit [base, base+len) as one or more MAP_RW data iovs. This is the only place a
+ * data iov is written, so it is the single point where the iovs[] bound is
+ * enforced.
+ *
+ * A run is contiguous in guest-physical (IOVA) space, but map_one() can only
+ * translate a range that lies within a single registered vfio-user DMA region
+ * (it asks vfu_addr_to_sgl for one segment). A run that spans a region boundary
+ * therefore cannot be mapped whole: gpa_to_vva returns NULL. Recover by mapping
+ * the largest page-aligned prefix that does translate and emitting the remainder
+ * as further iovs, one per region. A genuinely unmapped address bottoms out at a
+ * single page and returns -EINVAL. This keeps the single-iov fast path for truly
+ * contiguous buffers (e.g. a GPU VRAM P2P BAR) while staying correct for guest
+ * RAM that is IOVA-contiguous but split across host memory regions.
+ */
+static int
+nvme_prp_emit_run(struct nvme_prp_map *m, uint64_t base, uint64_t len)
+{
+	while (len != 0) {
+		uint64_t chunk = len;
+		void *vva;
+
+		if (spdk_unlikely(m->iovcnt >= m->max_iovcnt)) {
+			SPDK_ERRLOG("Too many page entries (run needs > %u iovs; "
+				    "fragmented or oversized transfer)\n", m->max_iovcnt);
+			return -ERANGE;
+		}
+
+		while ((vva = m->gpa_to_vva(m->prv, base, chunk, MAP_RW)) == NULL) {
+			if (chunk <= m->mps) {
+				SPDK_ERRLOG("no VVA for %#" PRIx64 ", len %#" PRIx64 "\n",
+					    base, chunk);
+				return -EINVAL;
+			}
+			/* shrink to the largest page-aligned prefix and retry */
+			chunk /= 2;
+			chunk -= chunk % m->mps;
+			if (chunk < m->mps) {
+				chunk = m->mps;
+			}
+		}
+
+		m->iovs[m->iovcnt].iov_base = vva;
+		m->iovs[m->iovcnt].iov_len = chunk;
+		m->iovcnt++;
+		base += chunk;
+		len -= chunk;
+	}
+	return 0;
+}
+
+/*
+ * Flush the pending coalesced run as data iov(s) and clear it. No-op when no run
+ * is pending.
+ */
+static int
+nvme_prp_flush_run(struct nvme_prp_map *m)
+{
+	int rc;
+
+	if (!m->have_run) {
+		return 0;
+	}
+
+	rc = nvme_prp_emit_run(m, m->run_base, m->run_len);
+	m->have_run = false;
+	return rc;
+}
+
+/*
+ * Map one PRP list page at list_gpa (MAP_R) and coalesce its first n_data data
+ * entries into m's pending run, flushing whenever physical contiguity breaks.
+ * *len is decremented by the bytes consumed. The run state persists in m across
+ * calls, so a buffer contiguous across a list-page boundary still collapses to a
+ * single iov. The list-page mapping itself accumulates in the request iov array
+ * (via gpa_to_vva) and is released when the request completes.
+ *
+ * When chain is true the entry immediately after the data entries (index n_data,
+ * which the caller sized as ents_per_page - 1) is the pointer to the next list
+ * page rather than a data entry; *next_list_gpa receives it. That slot is covered
+ * by mapping n_data + 1 entries, so the read is in-bounds of the mapping. The
+ * chain pointer is guest-controlled but re-validated by gpa_to_vva on the next
+ * page, and the walk is bounded by *len (which strictly decreases since
+ * n_data >= 1), so a malformed or cyclic chain fails cleanly without looping.
+ */
+static int
+nvme_prp_map_list_page(struct nvme_prp_map *m, uint64_t list_gpa, uint32_t n_data,
+		       uint32_t *len, bool chain, uint64_t *next_list_gpa)
+{
+	uint32_t map_ents = n_data + (chain ? 1 : 0);
+	uint64_t *prp_list;
+	uint32_t i;
+	int rc;
+
+	prp_list = m->gpa_to_vva(m->prv, list_gpa, map_ents * sizeof(*prp_list), MAP_R);
+	if (spdk_unlikely(prp_list == NULL)) {
+		SPDK_ERRLOG("no VVA for PRP list %#" PRIx64 ", ents=%#x\n",
+			    list_gpa, map_ents);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < n_data; i++) {
+		uint32_t residue_len = spdk_min(*len, m->mps);
+
+		if (m->have_run && prp_list[i] == m->run_base + m->run_len) {
+			/* contiguous: extend the current run */
+			m->run_len += residue_len;
+		} else {
+			/* discontiguity: flush the previous run, start a new one */
+			rc = nvme_prp_flush_run(m);
+			if (spdk_unlikely(rc)) {
+				return rc;
+			}
+			m->run_base = prp_list[i];
+			m->run_len = residue_len;
+			m->have_run = true;
+		}
+		*len -= residue_len;
+	}
+
+	if (chain) {
+		*next_list_gpa = prp_list[n_data];
+	}
+	return 0;
+}
+
 static int
 nvme_cmd_map_prps(void *prv, struct spdk_nvme_cmd *cmd, struct iovec *iovs,
 		  uint32_t max_iovcnt, uint32_t len, size_t mps,
@@ -666,9 +831,7 @@ nvme_cmd_map_prps(void *prv, struct spdk_nvme_cmd *cmd, struct iovec *iovs,
 {
 	uint64_t prp1, prp2;
 	void *vva;
-	uint32_t i;
-	uint32_t residue_len, nents;
-	uint64_t *prp_list;
+	uint32_t residue_len;
 	uint32_t iovcnt;
 
 	assert(max_iovcnt > 0);
@@ -711,35 +874,55 @@ nvme_cmd_map_prps(void *prv, struct spdk_nvme_cmd *cmd, struct iovec *iovs,
 			iovs[1].iov_base = vva;
 			iovs[1].iov_len = len;
 		} else {
-			/* PRP list used */
-			nents = (len + mps - 1) / mps;
-			if (spdk_unlikely(nents + 1 > max_iovcnt)) {
-				SPDK_ERRLOG("Too many page entries\n");
-				return -ERANGE;
+			/*
+			 * PRP list used. Walk the (possibly chained) PRP list and
+			 * coalesce physically-contiguous data pages into as few iovs as
+			 * possible. A contiguous buffer (e.g. a GPU VRAM P2P region)
+			 * collapses to a single iov regardless of transfer size, keeping
+			 * iovcnt within NVMF_REQ_MAX_BUFFERS (and the uint8_t iovcnt
+			 * field) for transfers far larger than the raw page count would
+			 * otherwise allow.
+			 *
+			 * Each PRP list page holds (mps / 8) entries; when the list spans
+			 * multiple pages, the last entry of every non-final page points to
+			 * the next list page (NVMe base spec PRP chaining, page-aligned so
+			 * the chain pointer is the last entry of the page). List pages are
+			 * mapped MAP_R; they accumulate in the request iov array and are
+			 * released when the request completes. The per-page mapping and
+			 * coalescing live in nvme_prp_map_list_page().
+			 */
+			uint32_t ents_per_page = mps / sizeof(uint64_t);
+			uint64_t cur_list_gpa = prp2;
+			struct nvme_prp_map m = {
+				.prv = prv,
+				.iovs = iovs,
+				.iovcnt = 1, /* iovs[0] holds PRP1 */
+				.max_iovcnt = max_iovcnt,
+				.mps = mps,
+				.gpa_to_vva = gpa_to_vva,
+			};
+			int rc;
+
+			/* a list page must hold at least one data entry plus a chain pointer */
+			assert(ents_per_page >= 2);
+
+			while (len != 0) {
+				uint32_t data_pages = (len + mps - 1) / mps;
+				bool chained = data_pages > ents_per_page;
+				uint32_t n_data = chained ? (ents_per_page - 1) : data_pages;
+
+				rc = nvme_prp_map_list_page(&m, cur_list_gpa, n_data,
+							    &len, chained, &cur_list_gpa);
+				if (spdk_unlikely(rc)) {
+					return rc;
+				}
 			}
 
-			vva = gpa_to_vva(prv, prp2, nents * sizeof(*prp_list), MAP_R);
-			if (spdk_unlikely(vva == NULL)) {
-				SPDK_ERRLOG("no VVA for %#" PRIx64 ", nents=%#x\n",
-					    prp2, nents);
-				return -EINVAL;
+			rc = nvme_prp_flush_run(&m);
+			if (spdk_unlikely(rc)) {
+				return rc;
 			}
-			prp_list = vva;
-			i = 0;
-			while (len != 0) {
-				residue_len = spdk_min(len, mps);
-				vva = gpa_to_vva(prv, prp_list[i], residue_len, MAP_RW);
-				if (spdk_unlikely(vva == NULL)) {
-					SPDK_ERRLOG("no VVA for %#" PRIx64 ", residue_len=%#x\n",
-						    prp_list[i], residue_len);
-					return -EINVAL;
-				}
-				iovs[i + 1].iov_base = vva;
-				iovs[i + 1].iov_len = residue_len;
-				len -= residue_len;
-				i++;
-			}
-			iovcnt = i + 1;
+			iovcnt = m.iovcnt;
 		}
 	} else {
 		/* 1 PRP used */
@@ -1145,6 +1328,44 @@ nvmf_vfio_user_create(struct spdk_nvmf_transport_opts *opts)
 		return NULL;
 	}
 
+	/*
+	 * Reject a max_io_size the per-request scatter-gather list cannot map.
+	 * nvme_cmd_map_prps maps one IO as: 1 mapping for PRP1, one per chained
+	 * PRP-list page, plus the data runs. The list pages are the fixed cost of a
+	 * transfer of this size; the data runs are capped at NVMF_REQ_MAX_BUFFERS by
+	 * nvme_cmd_map_prps. The total must fit NVMF_VFIO_USER_MAX_IOVECS (enforced
+	 * per-IO in nvme_prp_emit_run); validate it here so a misconfiguration fails
+	 * at transport create time rather than per command. ~128 MiB with the
+	 * current constants; raising the ceiling means growing
+	 * NVMF_VFIO_USER_MAX_IOVECS.
+	 *
+	 * This sizes the budget for the best case (a physically-contiguous transfer
+	 * collapses to few data runs). A heavily fragmented transfer of an accepted
+	 * size can still exhaust the NVMF_REQ_MAX_BUFFERS data-run cap at runtime
+	 * (-ERANGE from nvme_prp_emit_run): large IO assumes reasonably contiguous
+	 * guest buffers. Rejecting every size whose fully-fragmented worst case fits
+	 * would cap max_io_size near NVMF_REQ_MAX_BUFFERS pages and defeat the
+	 * feature, so the precondition is documented rather than enforced here.
+	 */
+	if (opts->max_io_size != 0) {
+		uint64_t ents_per_page = NVMF_VFIO_USER_MPS / sizeof(uint64_t);
+		/* last entry of a non-final list page is the chain pointer */
+		uint64_t data_per_list_page = ents_per_page - 1;
+		uint64_t data_pages = ((uint64_t)opts->max_io_size + NVMF_VFIO_USER_MPS - 1) /
+				      NVMF_VFIO_USER_MPS;
+		/* PRP1 covers the first data page; the rest are pointed to by the list */
+		uint64_t list_pages = data_pages > 1 ?
+				      (data_pages - 1 + data_per_list_page - 1) / data_per_list_page : 0;
+		uint64_t max_maps = 1 + list_pages + NVMF_REQ_MAX_BUFFERS;
+
+		if (max_maps > NVMF_VFIO_USER_MAX_IOVECS) {
+			SPDK_ERRLOG("max_io_size %u too large for vfio-user: needs up to %" PRIu64
+				    " DMA mappings, max %d\n",
+				    opts->max_io_size, max_maps, NVMF_VFIO_USER_MAX_IOVECS);
+			return NULL;
+		}
+	}
+
 	vu_transport = calloc(1, sizeof(*vu_transport));
 	if (vu_transport == NULL) {
 		SPDK_ERRLOG("Transport alloc fail: %m\n");
@@ -1542,7 +1763,21 @@ _map_one(void *prv, uint64_t addr, uint64_t len, uint32_t flags)
 	vu_req = SPDK_CONTAINEROF(req, struct nvmf_vfio_user_req, req);
 	sq = SPDK_CONTAINEROF(qpair, struct nvmf_vfio_user_sq, qpair);
 
-	assert(vu_req->iovcnt < NVMF_VFIO_USER_MAX_IOVECS);
+	/*
+	 * Bound the per-request scatter-gather list. nvme_cmd_map_prps caps the
+	 * coalesced data runs at NVMF_REQ_MAX_BUFFERS, but the transient PRP
+	 * list-page mappings accumulate here too, so for a large enough transfer
+	 * (max_io_size raised past what 128 iovecs can map, ~128 MiB at 4 KiB
+	 * pages) the total can still exceed NVMF_VFIO_USER_MAX_IOVECS. Fail the
+	 * mapping cleanly instead of overrunning iov[]/sg[] (the assert is
+	 * compiled out in release builds); the caller maps a NULL return to an
+	 * error and completes the command.
+	 */
+	if (spdk_unlikely(vu_req->iovcnt >= NVMF_VFIO_USER_MAX_IOVECS)) {
+		SPDK_ERRLOG("%s: command exceeds %d DMA mappings; raise NVMF_VFIO_USER_MAX_IOVECS or lower max_io_size\n",
+			    ctrlr_id(sq->ctrlr), NVMF_VFIO_USER_MAX_IOVECS);
+		return NULL;
+	}
 	ret = map_one(sq->ctrlr->endpoint->vfu_ctx, addr, len,
 		      index_to_sg_t(vu_req->sg, vu_req->iovcnt),
 		      &vu_req->iov[vu_req->iovcnt], flags);
@@ -1560,7 +1795,7 @@ vfio_user_map_cmd(struct nvmf_vfio_user_ctrlr *ctrlr, struct spdk_nvmf_request *
 	 * virtual memory address.
 	 */
 	return nvme_map_cmd(req, &req->cmd->nvme_cmd, iov, NVMF_REQ_MAX_BUFFERS,
-			    length, 4096, _map_one);
+			    length, NVMF_VFIO_USER_MPS, _map_one);
 }
 
 static int handle_cmd_req(struct nvmf_vfio_user_ctrlr *ctrlr, struct spdk_nvme_cmd *cmd,
