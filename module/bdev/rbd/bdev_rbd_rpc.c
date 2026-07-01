@@ -173,16 +173,6 @@ rpc_bdev_rbd_set_with_crc32c(struct spdk_jsonrpc_request *request,
 	spdk_jsonrpc_end_result(request, w);
 }
 
-struct rpc_bdev_rbd_delete {
-	char *name;
-};
-
-static void
-free_rpc_bdev_rbd_delete(struct rpc_bdev_rbd_delete *req)
-{
-	free(req->name);
-}
-
 static const struct spdk_json_object_decoder rpc_bdev_rbd_delete_decoders[] = {
 	{"name", offsetof(struct rpc_bdev_rbd_delete_ctx, name), spdk_json_decode_string},
 };
