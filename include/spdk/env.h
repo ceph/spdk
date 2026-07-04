@@ -1525,6 +1525,29 @@ int32_t spdk_mem_get_numa_id(const void *buf, uint64_t *size);
  */
 int spdk_mem_get_fd_and_offset(void *vaddr, uint64_t *offset);
 
+/**
+ * Associate a virtual address range with an external dma-buf file descriptor so
+ * that spdk_mem_get_fd_and_offset() returns that fd/offset for the range. This
+ * lets memory that is not a DPDK memseg (e.g. a GPU VRAM buffer CPU-mmapped from
+ * a dma-buf) be mapped to a vfio-user target by fd, enabling zero-copy DMA into
+ * it. Register BEFORE spdk_mem_register() so the DMA-map notify observes the fd.
+ *
+ * \param vaddr Start of the range (the CPU mapping of the dma-buf).
+ * \param len Length of the range in bytes.
+ * \param fd The dma-buf file descriptor backing the range.
+ * \param offset Byte offset within the dma-buf at which \c vaddr maps.
+ *
+ * \return 0 on success, negative errno on failure.
+ */
+int spdk_mem_register_external_fd(void *vaddr, size_t len, int fd, uint64_t offset);
+
+/**
+ * Remove an association created by spdk_mem_register_external_fd().
+ *
+ * \param vaddr The range start previously passed to spdk_mem_register_external_fd().
+ */
+void spdk_mem_unregister_external_fd(void *vaddr);
+
 enum spdk_pci_event_type {
 	SPDK_UEVENT_ADD = 0,
 	SPDK_UEVENT_REMOVE = 1,

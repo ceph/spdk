@@ -141,6 +141,83 @@ static TAILQ_HEAD(spdk_mem_map_head, spdk_mem_map) g_spdk_mem_maps =
 	TAILQ_HEAD_INITIALIZER(g_spdk_mem_maps);
 static pthread_mutex_t g_spdk_mem_map_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/*
+ * External dma-buf fd registrations. A caller (e.g. a GPU allocator) associates a
+ * virtual address range with a dma-buf fd + offset so spdk_mem_get_fd_and_offset()
+ * -- which the vfio-user transport uses to map client memory to the target BY FD
+ * -- returns that fd. This lets memory that is NOT a DPDK memseg (e.g. GPU VRAM
+ * CPU-mmapped from a dma-buf) be mapped to, and DMA'd into by, a vfio-user target
+ * zero-copy. Complements spdk_mem_register() (which triggers the DMA-map notify):
+ * register the fd BEFORE spdk_mem_register() so the notify observes it.
+ */
+struct spdk_external_fd_reg {
+	const char			*vaddr;
+	size_t				len;
+	int				fd;
+	uint64_t			offset;
+	TAILQ_ENTRY(spdk_external_fd_reg) link;
+};
+static TAILQ_HEAD(, spdk_external_fd_reg) g_external_fds =
+	TAILQ_HEAD_INITIALIZER(g_external_fds);
+static pthread_mutex_t g_external_fd_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int
+external_fd_lookup(const void *vaddr, int *fd, uint64_t *offset)
+{
+	struct spdk_external_fd_reg *reg;
+	const char *v = vaddr;
+
+	pthread_mutex_lock(&g_external_fd_mutex);
+	TAILQ_FOREACH(reg, &g_external_fds, link) {
+		if (v >= reg->vaddr && v < reg->vaddr + reg->len) {
+			*fd = reg->fd;
+			*offset = reg->offset + (uint64_t)(v - reg->vaddr);
+			pthread_mutex_unlock(&g_external_fd_mutex);
+			return 0;
+		}
+	}
+	pthread_mutex_unlock(&g_external_fd_mutex);
+	return -ENOENT;
+}
+
+int
+spdk_mem_register_external_fd(void *vaddr, size_t len, int fd, uint64_t offset)
+{
+	struct spdk_external_fd_reg *reg;
+
+	if (vaddr == NULL || len == 0 || fd < 0) {
+		return -EINVAL;
+	}
+	reg = calloc(1, sizeof(*reg));
+	if (reg == NULL) {
+		return -ENOMEM;
+	}
+	reg->vaddr = vaddr;
+	reg->len = len;
+	reg->fd = fd;
+	reg->offset = offset;
+	pthread_mutex_lock(&g_external_fd_mutex);
+	TAILQ_INSERT_TAIL(&g_external_fds, reg, link);
+	pthread_mutex_unlock(&g_external_fd_mutex);
+	return 0;
+}
+
+void
+spdk_mem_unregister_external_fd(void *vaddr)
+{
+	struct spdk_external_fd_reg *reg;
+
+	pthread_mutex_lock(&g_external_fd_mutex);
+	TAILQ_FOREACH(reg, &g_external_fds, link) {
+		if ((const char *)vaddr == reg->vaddr) {
+			TAILQ_REMOVE(&g_external_fds, reg, link);
+			free(reg);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_external_fd_mutex);
+}
+
 static bool g_legacy_mem;
 static bool g_huge_pages = true;
 static bool g_vtophys = true;
@@ -1957,6 +2034,12 @@ spdk_mem_get_fd_and_offset(void *vaddr, uint64_t *offset)
 {
 	struct rte_memseg *seg;
 	int ret, fd;
+
+	/* An externally-registered dma-buf fd (e.g. GPU VRAM) takes precedence: it
+	 * is not a DPDK memseg, so it must be resolved from the external registry. */
+	if (external_fd_lookup(vaddr, &fd, offset) == 0) {
+		return fd;
+	}
 
 	seg = rte_mem_virt2memseg(vaddr, NULL);
 	if (!seg) {
