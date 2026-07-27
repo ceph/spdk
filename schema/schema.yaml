@@ -5710,6 +5710,21 @@ methods:
         type: uint32
         required: true
         description: number of blocks in chunk
+  - name: nvmf_set_transient_hold
+    description: Configure enable/disable transient hold of IOs in internal buffers
+    result:
+      type: boolean
+      description: true on success
+    params:
+      - name: subnqn
+        type: string
+        description: subsystem nqn
+      - name: enable
+        type: boolean
+        description: enable transient hold of IOs
+      - name: timeout_ms
+        type: uint32
+        description: number of milliseconds to hold
   - name: nvmf_subsystem_set_ana_states_all
     description: Set ANA states across all NVMe-oF subsystems and listeners
     result:
