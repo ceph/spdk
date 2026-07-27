@@ -3638,3 +3638,196 @@ rpc_nvmf_cnc_set_config(struct spdk_jsonrpc_request *request, const struct spdk_
 
 /* Register the method name into the global SPDK RPC command listing interface */
 SPDK_RPC_REGISTER("nvmf_cnc_set_config", rpc_nvmf_cnc_set_config, SPDK_RPC_RUNTIME);
+
+
+/* RPC Parameter Structure */
+struct rpc_nvmf_set_transient_hold_req {
+	char *subnqn;          /* Optional: Specific Subsystem NQN or NULL for ALL */
+	bool enable;           /* Required: true = start hold, false = release/drain */
+	uint32_t timeout_ms;   /* Optional: Fallback timeout in milliseconds */
+};
+
+/* JSON Decoder Rules */
+static const struct spdk_json_object_decoder rpc_nvmf_set_transient_hold_decoders[] = {
+	{"subnqn", offsetof(struct rpc_nvmf_set_transient_hold_req, subnqn), spdk_json_decode_string, true},
+	{"enable", offsetof(struct rpc_nvmf_set_transient_hold_req, enable), spdk_json_decode_bool, true},
+	{"timeout_ms", offsetof(struct rpc_nvmf_set_transient_hold_req, timeout_ms), spdk_json_decode_uint32, true},
+};
+
+int
+nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req);
+
+/* Channel Callback: Executed directly on each reactor core */
+static void
+nvmf_subsystem_drain_qpairs_on_pg(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct spdk_nvmf_poll_group *group = spdk_io_channel_get_ctx(ch);
+	struct spdk_nvmf_subsystem *subsys = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_nvmf_qpair *qpair, *tmp;
+	struct spdk_nvmf_request *req, *req_tmp;
+
+	TAILQ_FOREACH_SAFE(qpair, &group->qpairs, link, tmp) {
+		if (subsys == NULL || (qpair->ctrlr && qpair->ctrlr->subsys == subsys)) {
+			if (!nvmf_qpair_is_admin_queue(qpair)) {
+
+				/* Unpause and submit held requests to bdev layer in strict FIFO order */
+				TAILQ_FOREACH_SAFE(req, &qpair->outstanding, link, req_tmp) {
+					if (req->is_held) {
+						struct spdk_nvme_cmd *cmd = &req->cmd->nvme_cmd;
+						nvmf_request_set_held(req, false);
+						SPDK_NOTICELOG("transient Draining held req %p (opc 0x%x) on qid %u, held_req_count %d\n",
+								req, cmd->opc, qpair->qid, qpair->held_req_count);
+						int rc = nvmf_ctrlr_process_io_cmd(req);
+						if (rc == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE) {
+							spdk_nvmf_request_complete(req);
+						}
+					}
+				}
+			}
+		}
+	}
+	spdk_for_each_channel_continue(i, 0);
+}
+
+/* Completion Callback: Runs on RPC thread after all reactor cores finish draining */
+static void
+nvmf_subsystem_drain_done_cb(struct spdk_io_channel_iter *i, int status)
+{
+	struct spdk_nvmf_subsystem *subsys = spdk_io_channel_iter_get_ctx(i);
+
+	if (subsys) {
+		SPDK_NOTICELOG("Transient hold fully drained and disabled for subsystem %s\n", subsys->subnqn);
+	}
+}
+
+/* Helper to start asynchronous drain across reactor channels */
+static void
+nvmf_subsystem_drain_all_qpairs(struct spdk_nvmf_subsystem *subsys)
+{
+	spdk_for_each_channel(subsys->tgt,
+			nvmf_subsystem_drain_qpairs_on_pg, subsys,
+			nvmf_subsystem_drain_done_cb);
+}
+
+/* Timer Callback */
+static int
+nvmf_subsystem_transient_hold_timeout_cb(void *arg)
+{
+	struct spdk_nvmf_subsystem *subsys = arg;
+
+	SPDK_WARNLOG("Subsystem %s transient hold timeout expired! Triggering fallback.\n",
+				subsys->subnqn);
+
+	/* Unregister timer and clear pointer safely */
+	if (subsys->transient_hold_poller != NULL) {
+		spdk_poller_unregister(&subsys->transient_hold_poller);
+		subsys->transient_hold_poller = NULL;
+	}
+	/* Start drain across channels */
+	subsys->transient_hold_enabled = false;
+	nvmf_subsystem_drain_all_qpairs(subsys);
+
+	return SPDK_POLLER_BUSY;
+}
+
+/* Enable Transient Hold */
+static void
+nvmf_subsystem_enable_hold(struct spdk_nvmf_subsystem *subsys, uint32_t timeout_ms)
+{
+	if (subsys->transient_hold_enabled) {
+		return;
+	}
+	subsys->transient_hold_enabled = true;
+	if (timeout_ms) {
+		uint64_t timeout_us = (uint64_t)(timeout_ms * 1000);
+		subsys->transient_hold_poller = SPDK_POLLER_REGISTER(
+				nvmf_subsystem_transient_hold_timeout_cb, subsys,
+				timeout_us);
+	}	else {
+		subsys->transient_hold_poller = NULL;
+	}
+	SPDK_NOTICELOG("Transient hold ENABLED for subsystem %s (%s)\n",
+			subsys->subnqn,
+			timeout_ms ? "timeout active" : "indefinite / manual disable");
+}
+
+/* Disable Transient Hold on a Subsystem (Happy Path) */
+static void
+nvmf_subsystem_disable_hold(struct spdk_nvmf_subsystem *subsys)
+{
+	if (!subsys->transient_hold_enabled) {
+		return;
+	}
+	/*1. Unregister the subsystem poller*/
+	if (subsys->transient_hold_poller != NULL) {
+		spdk_poller_unregister(&subsys->transient_hold_poller);
+		subsys->transient_hold_poller = NULL;
+	}
+	/* 2. DISABLE HOLD FIRST! Stop trapping new requests immediately! */
+	subsys->transient_hold_enabled = false;
+
+	/* Dispatch drain to reactors. nvmf_subsystem_drain_done_cb resets transient_hold_enabled */
+	nvmf_subsystem_drain_all_qpairs(subsys);
+}
+
+/* Main RPC Handler Function */
+static void
+rpc_nvmf_set_transient_hold(struct spdk_jsonrpc_request *request,
+							const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_set_transient_hold_req req = {0};
+	struct spdk_nvmf_tgt *tgt;
+	struct spdk_nvmf_subsystem *subsystem;
+
+	if (spdk_json_decode_object(params, rpc_nvmf_set_transient_hold_decoders,
+				SPDK_COUNTOF(rpc_nvmf_set_transient_hold_decoders), &req)) {
+		SPDK_ERRLOG("Failed to parse RPC parameters\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		return;
+	}
+
+	tgt = spdk_nvmf_get_tgt(NULL);
+	if (!tgt) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Target instance not found");
+		free(req.subnqn);
+		return;
+	}
+	/* Determine target scope: single subsystem or ALL subsystems */
+	bool apply_to_all = (req.subnqn == NULL || strcmp(req.subnqn, "all") == 0 || strlen(req.subnqn) == 0);
+
+	if (apply_to_all) {
+		/* Iterate over all subsystems in memory */
+		subsystem = spdk_nvmf_subsystem_get_first(tgt); //NVMF_SUBSYSTEM_FOREACH(tgt, subsystem)
+		while (subsystem != NULL) {
+			if (subsystem->opts.type == SPDK_NVMF_SUBTYPE_NVME) {
+				SPDK_NOTICELOG("Started rpc_nvmf_set_transient_hold, enable %d\n", req.enable);
+				if (req.enable) {
+					nvmf_subsystem_enable_hold(subsystem, req.timeout_ms);
+				} else {
+					nvmf_subsystem_disable_hold(subsystem);
+				}
+			}
+			subsystem = spdk_nvmf_subsystem_get_next(subsystem);
+		}
+	} else {
+		/* Target a single subsystem */
+		subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req.subnqn);
+		if (!subsystem) {
+			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+					"Subsystem %s not found", req.subnqn);
+			free(req.subnqn);
+			return;
+		}
+		SPDK_NOTICELOG("Started rpc_nvmf_set_transient_hold, enable %d\n", req.enable);
+		if (req.enable) {
+			nvmf_subsystem_enable_hold(subsystem, req.timeout_ms);
+		} else {
+			nvmf_subsystem_disable_hold(subsystem);
+		}
+	}
+	free(req.subnqn);
+	spdk_jsonrpc_send_bool_response(request, true);
+}
+
+SPDK_RPC_REGISTER("nvmf_set_transient_hold", rpc_nvmf_set_transient_hold, SPDK_RPC_RUNTIME);

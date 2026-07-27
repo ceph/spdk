@@ -431,6 +431,14 @@ struct spdk_nvmf_subsystem {
 	TAILQ_HEAD(, nvmf_subsystem_state_change_ctx)	state_changes;
 	/* In-band authentication sequence number, protected by ->mutex */
 	uint32_t					auth_seqnum;
+	/* Flag indicating transient holds are active for Step 2 */
+	bool transient_hold_enabled;
+
+	/* SPDK non-blocking timer handle */
+	struct spdk_poller *transient_hold_poller;
+
+	/* Duration to hold I/O in microseconds */
+	uint64_t hold_timeout_us;
 };
 
 extern spdk_nvmf_custom_discovery_filter g_custom_discovery_filter;
@@ -727,6 +735,22 @@ nvmf_get_transport_poll_group(struct spdk_nvmf_poll_group *group,
 	}
 
 	return NULL;
+}
+
+static inline void
+nvmf_request_set_held(struct spdk_nvmf_request *req, bool hold)
+{
+    if (req->is_held == hold) {
+        return;
+    }
+
+    req->is_held = hold;
+
+    if (hold) {
+        req->qpair->held_req_count++;
+    } else if (req->qpair->held_req_count > 0) {
+        req->qpair->held_req_count--;
+    }
 }
 
 /**

@@ -6586,6 +6586,29 @@
         }
       ]
     },
+	{
+      "name": "nvmf_set_transient_hold",
+      "params": [
+        {
+          "name": "subnqn",
+          "type": "string",
+          "required": false,
+          "description": "Subsystem nqn or apply to all subsystems if value is null"
+        },
+       {
+          "name": "enable",
+          "type": "boolean",
+          "required": false,
+          "description": "enable transient hold or disable"
+       },
+       {
+          "name": "timeout_ms",
+          "type": "uint32",
+          "required": false,
+          "description": "time to hold IOs in internal buffers in miliseconds or infinite hold if 0"
+	   }
+     ]
+	},
     {
       "name": "fsdev_aio_delete",
       "params": [

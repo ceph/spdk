@@ -3920,6 +3920,7 @@ static void
 nvmf_qpair_abort_request(struct spdk_nvmf_qpair *qpair, struct spdk_nvmf_request *req)
 {
 	uint16_t cid = req->cmd->nvme_cmd.cdw10_bits.abort.cid;
+	struct spdk_nvmf_request *req_to_abort;
 
 	if (nvmf_qpair_abort_aer(qpair, cid)) {
 		SPDK_DEBUGLOG(nvmf, "abort ctrlr=%p sqid=%u cid=%u successful\n",
@@ -3929,6 +3930,31 @@ nvmf_qpair_abort_request(struct spdk_nvmf_qpair *qpair, struct spdk_nvmf_request
 		spdk_nvmf_request_complete(req);
 		return;
 	}
+
+	/* Find target "held" command in qpair->outstanding */
+	TAILQ_FOREACH(req_to_abort, &qpair->outstanding, link) {
+		if (req_to_abort->cmd->nvme_cmd.cid == cid) {
+			if (req_to_abort->is_held) {
+				SPDK_DEBUGLOG(nvmf, "Aborting held req %p (cid %u) on qid %u\n",
+						req_to_abort, cid, qpair->qid);
+
+				/* 1. Clear held status & decrement held_req_count */
+				nvmf_request_set_held(req_to_abort, false);
+
+				/* 2. Fail target held I/O back to host as Aborted */
+				req_to_abort->rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
+				req_to_abort->rsp->nvme_cpl.status.sc = SPDK_NVME_SC_ABORTED_BY_HOST;
+				spdk_nvmf_request_complete(req_to_abort);
+
+				/* 3. Mark Abort Admin command successful (cdw0 bit 0 = 0) */
+				req->rsp->nvme_cpl.cdw0 &= ~1U;
+				spdk_nvmf_request_complete(req);
+				return;
+			}
+			break;
+		}
+	}
+
 	if (nvmf_qpair_cid_is_reservation(qpair, cid)) {
 		/* We don't support aborting reservation requests, leave completion as not-aborted */
 		SPDK_DEBUGLOG(nvmf, "abort ctrlr=%p sqid=%u cid=%u for reservation not supported\n",
@@ -5542,9 +5568,24 @@ spdk_nvmf_request_exec(struct spdk_nvmf_request *req)
 	if (SPDK_DEBUGLOG_FLAG_ENABLED("nvmf")) {
 		spdk_nvme_print_command(qpair->qid, &req->cmd->nvme_cmd);
 	}
+	/* =========================================================================
+	     * TRANSIENT HOLD INTERCEPT (Strict O(1) Fast Path)
+	* ========================================================================= */
+	struct spdk_nvmf_subsystem *subsys = qpair->ctrlr ? qpair->ctrlr->subsys : NULL;
+	bool should_hold = (subsys && subsys->transient_hold_enabled) ||
+						(qpair->held_req_count > 0);
 
-	/* Place the request on the outstanding list so we can keep track of it */
+	req->is_held = false;
+	if (spdk_unlikely(should_hold && !nvmf_qpair_is_admin_queue(qpair) &&
+			req->cmd->nvmf_cmd.opcode  != SPDK_NVME_OPC_FABRIC)) {
+		nvmf_request_set_held(req, true);
+	}
 	TAILQ_INSERT_TAIL(&qpair->outstanding, req, link);
+	if (req->is_held == true) {
+		SPDK_NOTICELOG("transient Holding req %p (opc 0x%x) on qid %u held_req_count %d\n",
+					req, cmd->opc, qpair->qid, qpair->held_req_count);
+		return;
+	}
 
 	if (spdk_unlikely(req->cmd->nvmf_cmd.opcode == SPDK_NVME_OPC_FABRIC)) {
 		status = nvmf_ctrlr_process_fabrics_cmd(req);

@@ -1678,7 +1678,19 @@ spdk_nvmf_qpair_disconnect(struct spdk_nvmf_qpair *qpair)
 	}
 
 	qpair_ctx->qpair = qpair;
-
+	/* =========================================================================
+		* TRANSIENT HOLD CLEANUP: Fail all paused held requests in outstanding queue
+	* ========================================================================= */
+	struct spdk_nvmf_request *req, *tmp;
+	TAILQ_FOREACH_SAFE(req, &qpair->outstanding, link, tmp) {
+		if (req->is_held) {
+			nvmf_request_set_held(req, false);
+			struct spdk_nvme_cpl *rsp = &req->rsp->nvme_cpl;
+			rsp->status.sct = SPDK_NVME_SCT_GENERIC;
+			rsp->status.sc = SPDK_NVME_SC_ABORTED_SQ_DELETION;
+			spdk_nvmf_request_complete(req);
+		}
+	}
 	/* Check for outstanding I/O */
 	if (!TAILQ_EMPTY(&qpair->outstanding)) {
 		SPDK_DTRACE_PROBE2_TICKS(nvmf_poll_group_drain_qpair, qpair, spdk_thread_get_id(group->thread));
