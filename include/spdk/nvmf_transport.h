@@ -126,6 +126,8 @@ struct spdk_nvmf_request {
 	uint64_t			timeout_tsc;
 	uint32_t			orig_nsid;
 	union spdk_nvme_parameter_error_location	error_location;
+	/** Flag indicating request is paused inside qpair->outstanding during transient hold */
+	bool is_held;
 	STAILQ_ENTRY(spdk_nvmf_request)	reservation_link;
 };
 /* The iov array grows by two iovecs for every additional SGL entry, so the
@@ -185,6 +187,8 @@ struct spdk_nvmf_qpair {
 		uint32_t			id_valid : 1;
 		int32_t				id : 31;
 	} numa;
+	/* Tracks active held requests on this qpair */
+	uint32_t held_req_count;
 };
 
 static inline int32_t
