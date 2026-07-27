@@ -552,3 +552,14 @@ def add_parser(subparsers):
     p.add_argument('-m', '--max-inflight', help='maximum inflight chunk IOs per on CNC context', type=int, required=True)
     p.add_argument('-c', '--chunk-nlb', help='number of blocks in chunk IO', type=int, required=True)
     p.set_defaults(func=nvmf_cnc_set_config)
+
+    def nvmf_set_transient_hold(args):
+        args.client.nvmf_set_transient_hold(
+                                            subnqn=args.subnqn,
+                                            enable=args.enable,
+                                            timeout_ms=args.timeout_ms)
+    p = subparsers.add_parser('nvmf_set_transient_hold', help='Configure enable/disable transient hold of IOs in internal buffers')
+    p.add_argument('-n','--subnqn', help='subsystem nqn', type=str, required=False)
+    p.add_argument('-s', '--enable', help='enable transient hold of IOs',action='store_true')
+    p.add_argument('-t', '--timeout_ms', help='number of milliseconds to hold', type=int, required=False)
+    p.set_defaults(func=nvmf_set_transient_hold)
