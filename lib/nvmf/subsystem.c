@@ -426,6 +426,9 @@ spdk_nvmf_subsystem_create_ext(struct spdk_nvmf_tgt *tgt,
 	}
 
 	spdk_bit_array_set(tgt->subsystem_ids, sid);
+	/* Explicitly initialize transient hold fields */
+	subsystem->transient_hold_enabled = false;
+	subsystem->transient_hold_poller = NULL;
 	RB_INSERT(subsystem_tree, &tgt->subsystems, subsystem);
 
 	SPDK_DTRACE_PROBE1(nvmf_subsystem_create, subsystem->subnqn);
