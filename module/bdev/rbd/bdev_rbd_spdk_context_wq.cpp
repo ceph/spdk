@@ -98,9 +98,61 @@ std::atomic<uint32_t> ReactorThreadPool::g_reactor_next{0};
  */
 namespace {
 
+struct ProducerPool;
+
 struct SpdkFnMsg {
   std::function<void()> fn;
+  SpdkFnMsg *next = nullptr;
+  ProducerPool *owner = nullptr;
 };
+
+/* Per-producer recycling pool for SpdkFnMsg: a Treiber stack */
+struct ProducerPool {
+  std::atomic<SpdkFnMsg *> free{nullptr};
+};
+
+thread_local ProducerPool *t_producer_pool = nullptr;
+
+static ProducerPool *
+get_producer_pool()
+{
+  if (t_producer_pool == nullptr) {
+    t_producer_pool = new ProducerPool();
+  }
+  return t_producer_pool;
+}
+
+/* Allocate a message on the producer thread, recycling where possible */
+static SpdkFnMsg *
+pool_alloc(std::function<void()> fn)
+{
+  ProducerPool *p = get_producer_pool();
+  SpdkFnMsg *m = p->free.load(std::memory_order_acquire);
+  while (m != nullptr &&
+         !p->free.compare_exchange_weak(m, m->next,
+             std::memory_order_acquire, std::memory_order_acquire)) {
+  }
+  if (m == nullptr) {
+    m = new SpdkFnMsg();
+  }
+  m->fn = std::move(fn);
+  m->owner = p;
+  return m;
+}
+
+/* Return a message from the consumer side to its owning pool. */
+static void
+pool_free(SpdkFnMsg *m)
+{
+  m->fn = nullptr;
+
+  ProducerPool *p = m->owner;
+  SpdkFnMsg *old = p->free.load(std::memory_order_relaxed);
+  do {
+    m->next = old;
+  } while (!p->free.compare_exchange_weak(
+             old, m, std::memory_order_release, std::memory_order_relaxed));
+}
 
 struct ReactorDispatch {
   struct spdk_thread *reactor = nullptr;
@@ -122,7 +174,7 @@ reactor_dispatch_poll(void *arg)
   for (size_t i = 0; i < n; i++) {
     auto *m = static_cast<SpdkFnMsg *>(items[i]);
     m->fn();
-    delete m;
+    pool_free(m);
   }
 
   return n > 0 ? SPDK_POLLER_BUSY : SPDK_POLLER_IDLE;
@@ -144,7 +196,7 @@ reactor_fallback_handler(void *arg)
 {
   auto *m = static_cast<SpdkFnMsg *>(arg);
   m->fn();
-  delete m;
+  pool_free(m);
 }
 
 static std::mutex g_dispatch_mutex;
@@ -218,7 +270,7 @@ SpdkContextWQ::~SpdkContextWQ() {
 }
 
 void SpdkContextWQ::send_fn(Work fn) {
-  auto *msg = new SpdkFnMsg{std::move(fn)};
+  auto *msg = pool_alloc(std::move(fn));
   auto *rd = static_cast<ReactorDispatch *>(m_dispatch);
 
   // Fast path: lock-free enqueue into the reactor's MP/SC work ring. The reactor
@@ -234,7 +286,7 @@ void SpdkContextWQ::send_fn(Work fn) {
   // Fallback: legacy cross-thread message. Still correct, just slower.
   int rc = spdk_thread_send_msg(m_reactor_thread, reactor_fallback_handler, msg);
   if (rc != 0) {
-    delete msg;
+    pool_free(msg);
     SPDK_ERRLOG("SpdkContextWQ::send_fn: fallback spdk_thread_send_msg failed rc=%d\n", rc);
   }
 }

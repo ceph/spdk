@@ -2699,6 +2699,24 @@
       ]
     },
     {
+      "name": "bdev_rbd_get_with_spdk_wq",
+      "private": true,
+      "params": [
+      ]
+    },
+    {
+      "name": "bdev_rbd_set_with_spdk_wq",
+      "private": true,
+      "params": [
+        {
+          "name": "enable",
+          "type": "boolean",
+          "required": true,
+          "description": "Enable or disable the SPDK reactor work queue"
+        }
+      ]
+    },
+    {
       "name": "bdev_rbd_delete",
       "params": [
         {
