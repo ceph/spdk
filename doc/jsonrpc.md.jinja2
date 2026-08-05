@@ -12373,3 +12373,36 @@ Example response:
   "result": true
 }
 ~~~
+
+### nvmf_subsystem_set_ana_states_all {#rpc_nvmf_subsystem_set_ana_states_all}
+
+{{ nvmf_subsystem_set_ana_states_all_description }}
+
+#### Parameters
+
+{{ nvmf_subsystem_set_ana_states_all_params }}
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "id": 1,
+  "method": "nvmf_subsystem_set_ana_states_all",
+  "params": {
+    "chunk_subs": 10,
+    "ana_grpids": [1],
+    "ana_states": ["optimized"]
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "id": 1,
+  "result": true
+}
+~~

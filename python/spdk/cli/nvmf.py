@@ -519,3 +519,18 @@ Deprecated, use iobuf-small-cache-size instead""",
                               help='Stop publishing pull registration request through mdns')
     p.add_argument('-t', '--tgt-name', help='Parent NVMe-oF target name', type=str)
     p.set_defaults(func=nvmf_stop_mdns_prr)
+
+    def nvmf_subsystem_set_ana_states_all(args):
+       print_dict(args.client.nvmf_subsystem_set_ana_states_all(
+                  tgt_name=args.tgt_name,
+                  chunk_subs=args.chunk_subs,
+                  ana_grpids=args.ana_grpids,
+                  ana_states=args.ana_states))
+
+    p = subparsers.add_parser('nvmf_subsystem_set_ana_states_all', help='Set ANA states across all subsystems')
+    p.add_argument('-t', '--tgt-name', help='Target name')
+    p.add_argument('-c', '--chunk-subs', help='Number of subsystems that paused at once', type=int, required=True)
+    p.add_argument('-g', '--ana-grpids', type=partial(str.split, sep=','), default=[], help='Array of ana group ids', required=True)
+    p.add_argument('-a', '--ana-states', type=partial(str.split, sep=','), default=[],
+                   help='Array of corresponding ANA states', required=True)
+    p.set_defaults(func=nvmf_subsystem_set_ana_states_all)

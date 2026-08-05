@@ -14,6 +14,8 @@ a completion channel instead of continuously polling.
 
 ### nvmf
 
+Added `nvmf_subsystem_set_ana_states_all` RPC method and CLI support to set ANA states across all subsystems in chunks.
+
 Removed the deprecated `max_discard_size_kib` and `max_write_zeroes_size_kib` parameters from the
 `nvmf_create_subsystem` RPC. Use `dmrsl` and `wzsl` instead.
 

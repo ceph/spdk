@@ -499,6 +499,12 @@ arrays:
   - name: raid_base_bdevs
     item_type: string
     max_count: 255
+  - name: nvmf_ana_grpids
+    item_type: string
+    max_count: 32
+  - name: nvmf_ana_states
+    item_type: string
+    max_count: 32
 bitmasks:
   - name: dhchap_digests
     enum: dhchap_digest
@@ -4633,3 +4639,25 @@ methods:
         type: string
         required: true
         description: Name of the AIO fsdev to delete
+  - name: nvmf_subsystem_set_ana_states_all
+    description: |
+      Set ANA states across all NVMe-oF subsystems and listeners.
+    params:
+      - name: tgt_name
+        type: string
+        required: false
+        description: 'Target name'
+      - name: chunk_subs
+        type: uint32
+        required: true
+        description: 'Number of subsystems that paused at once'
+      - name: ana_grpids
+        type: array
+        class: nvmf_ana_grpids
+        required: true
+        description: 'Array of ana group ids'
+      - name: ana_states
+        type: array
+        class: nvmf_ana_states
+        required: true
+        description: 'Array of corresponding ANA states'
