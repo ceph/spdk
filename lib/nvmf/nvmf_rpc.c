@@ -3638,3 +3638,238 @@ rpc_nvmf_cnc_set_config(struct spdk_jsonrpc_request *request, const struct spdk_
 
 /* Register the method name into the global SPDK RPC command listing interface */
 SPDK_RPC_REGISTER("nvmf_cnc_set_config", rpc_nvmf_cnc_set_config, SPDK_RPC_RUNTIME);
+
+struct rpc_set_ana_states_all_subsystem_ctx;
+
+struct rpc_set_ana_states_all_call_ctx {
+	struct spdk_nvmf_target *target;
+	enum spdk_nvme_ana_state parsed_states[RPC_ANA_GRPIDS_MAX];
+	uint32_t parsed_grpids[RPC_ANA_GRPIDS_MAX];
+	struct spdk_jsonrpc_request *request;
+	uint32_t total_remaining;
+	struct spdk_nvmf_tgt *tgt;
+	uint32_t grp_count;
+	int status;
+	uint32_t remaining_subsystems;/// for detect resumed all subsystems
+	struct rpc_set_ana_states_all_subsystem_ctx * system_contexts;
+};
+
+struct rpc_set_ana_states_all_subsystem_ctx {
+	struct rpc_set_ana_states_all_call_ctx * parent;
+	struct spdk_nvmf_subsystem *subsystem;
+	uint32_t remaining;// for detect condition for trigger resume this subsystem
+};
+
+static int
+parse_ana_state_enum_str(const char *str, enum spdk_nvme_ana_state *state)
+{
+	if (strcmp(str, "optimized") == 0) {
+		*state = SPDK_NVME_ANA_OPTIMIZED_STATE;
+	} else if (strcmp(str, "non_optimized") == 0) {
+		*state = SPDK_NVME_ANA_NON_OPTIMIZED_STATE;
+	} else if (strcmp(str, "inaccessible") == 0) {
+		*state = SPDK_NVME_ANA_INACCESSIBLE_STATE;
+	} else if (strcmp(str, "change_in_progress") == 0 || strcmp(str, "change") == 0) {
+		*state = SPDK_NVME_ANA_CHANGE_STATE;
+	} else {
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static const struct spdk_json_object_decoder rpc_nvmf_subsystem_set_ana_states_all_decoders[] = {
+	{"tgt_name", offsetof(struct rpc_nvmf_subsystem_set_ana_states_all_ctx, tgt_name), spdk_json_decode_string, true},
+	{"ana_grpids", offsetof(struct rpc_nvmf_subsystem_set_ana_states_all_ctx, ana_grpids), rpc_decode_ana_grpids, false},
+	{"ana_states", offsetof(struct rpc_nvmf_subsystem_set_ana_states_all_ctx, ana_states), rpc_decode_ana_states, false},
+};
+
+static void
+rpc_subsystem_resumed_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int status)
+{
+	struct rpc_set_ana_states_all_subsystem_ctx * subs_ctx = cb_arg;
+	struct rpc_set_ana_states_all_call_ctx *parent_ctx = subs_ctx->parent;
+
+	if (status != 0 && parent_ctx->status == 0) {
+		parent_ctx->status = status;
+	}
+	SPDK_NOTICELOG("resumed subsystem %s, remain %d subsystems\n",
+                                       subs_ctx->subsystem->subnqn,
+                                       parent_ctx->remaining_subsystems);
+	parent_ctx->remaining_subsystems--;
+	if (parent_ctx->remaining_subsystems == 0) {
+		SPDK_NOTICELOG("resumed all subsystems after set_ana_states_all\n");
+		if (parent_ctx->status == 0) {
+			spdk_jsonrpc_send_bool_response(parent_ctx->request, true);
+		} else {
+			spdk_jsonrpc_send_error_response_fmt(parent_ctx->request,
+				 SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+			        "Failed to update ANA states: %d", parent_ctx->status);
+		}
+		free(parent_ctx->system_contexts);
+		free(parent_ctx);
+	}
+}
+
+static void
+rpc_ana_state_set_done(void *cb_arg, int status)
+{
+	struct rpc_set_ana_states_all_subsystem_ctx * subs_ctx = cb_arg;
+	struct rpc_set_ana_states_all_call_ctx *parent_ctx = subs_ctx->parent;
+	if (status != 0 && parent_ctx->status == 0) {
+		parent_ctx->status = status;
+	}
+	subs_ctx->remaining--;
+	if (subs_ctx->remaining == 0) {
+		spdk_nvmf_subsystem_resume(subs_ctx->subsystem, rpc_subsystem_resumed_cb, subs_ctx);
+	}
+	SPDK_NOTICELOG("set_ana_states_all done for subsystem %s, remains %d\n",
+                                subs_ctx->subsystem->subnqn, subs_ctx->remaining);
+}
+
+static void
+rpc_subsystem_paused_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int status)
+{
+	struct rpc_set_ana_states_all_subsystem_ctx * subs_ctx = cb_arg;
+	struct rpc_set_ana_states_all_call_ctx *parent_ctx = subs_ctx->parent;
+
+	/* Subsystem is now PAUSED: safe to execute set_ana_state */
+	struct spdk_nvmf_subsystem_listener *listener;
+	uint32_t listener_count = 0;
+
+	if (status != 0) {
+		if (parent_ctx->status == 0) {
+			parent_ctx->status = status;
+		}
+		spdk_nvmf_subsystem_resume(subsystem, rpc_subsystem_resumed_cb, subs_ctx);
+		return;
+	}
+	/* Count listeners upfront */
+	for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
+	     listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
+		listener_count++;
+	}
+	/* Handle 0 listeners edge case safely */
+	if (listener_count == 0) {
+		spdk_nvmf_subsystem_resume(subsystem, rpc_subsystem_resumed_cb, subs_ctx);
+		return;
+	}
+	subs_ctx->remaining = listener_count * parent_ctx->grp_count;
+	for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
+			listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
+		const struct spdk_nvme_transport_id *trid = spdk_nvmf_subsystem_listener_get_trid(listener);
+		for (size_t i = 0; i < parent_ctx->grp_count; i++) {
+			SPDK_NOTICELOG("Paused: set_ana_states: subs %s, listen %p, state %d grp %d\n",
+					subsystem->subnqn, listener,
+					parent_ctx->parsed_states[i], parent_ctx->parsed_grpids[i]);
+			spdk_nvmf_subsystem_set_ana_state(subsystem,
+						trid,
+						parent_ctx->parsed_states[i],
+						parent_ctx->parsed_grpids[i],
+						rpc_ana_state_set_done,
+						subs_ctx);
+		}
+	}
+}
+
+static void
+rpc_nvmf_subsystem_set_ana_states_all(struct spdk_jsonrpc_request *request,
+				       const struct spdk_json_val *params)
+{
+	struct rpc_nvmf_subsystem_set_ana_states_all_ctx req = {};
+	struct spdk_nvmf_tgt *tgt;
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_subsystem_listener *listener;
+	struct rpc_set_ana_states_all_call_ctx *ctx = NULL;
+	uint32_t total_calls = 0;
+	uint32_t total_subsystems = 0;
+	if (spdk_json_decode_object(params, rpc_nvmf_subsystem_set_ana_states_all_decoders,
+				    SPDK_COUNTOF(rpc_nvmf_subsystem_set_ana_states_all_decoders), &req)) {
+		SPDK_ERRLOG("Failed to decode parameters for nvmf_subsystem_set_ana_states_all\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		return;
+	}
+	if (!req.tgt_name) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Target name (-t / --tgt-name) is required");
+		goto cleanup;
+	}
+	if (req.ana_grpids.count != req.ana_states.count || req.ana_grpids.count == 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "ana_grpids and ana_states array lengths must match and be > 0");
+		goto cleanup;
+	}
+	tgt = spdk_nvmf_get_tgt(req.tgt_name);
+	if (!tgt) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Target not found");
+		goto cleanup;
+	}
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+			goto cleanup;
+	}
+	ctx->request = request;
+	ctx->status  = 0;
+	ctx->total_remaining = 0;
+	ctx->grp_count  = req.ana_grpids.count;
+	ctx->system_contexts = NULL;
+	for (size_t i = 0; i < req.ana_grpids.count; i++) {
+		ctx->parsed_grpids[i] = (uint32_t)strtoul(req.ana_grpids.items[i], NULL, 10);
+			if (parse_ana_state_enum_str(req.ana_states.items[i], &ctx->parsed_states[i]) != 0) {
+				spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+					"Invalid ANA state string: %s", req.ana_states.items[i]);
+				goto cleanup;
+			}
+	}
+	for (size_t i = 0; i < req.ana_grpids.count; i++) {
+		SPDK_NOTICELOG(" state: %d  ana_grpid %d \n", ctx->parsed_states[i], ctx->parsed_grpids[i]);
+	}
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem != NULL;
+		subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		const struct spdk_nvmf_subsystem_opts *opts = spdk_nvmf_subsystem_get_opts(subsystem);
+		if (opts->type  != SPDK_NVMF_SUBTYPE_NVME) {
+			continue;
+		}
+		total_subsystems ++;
+		for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
+				listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
+			total_calls += req.ana_grpids.count;
+		}
+	}
+	if (total_calls == 0) {
+		spdk_jsonrpc_send_bool_response(request, true);
+		goto cleanup;
+	}
+	ctx->system_contexts = calloc(total_subsystems, sizeof(struct rpc_set_ana_states_all_subsystem_ctx ));
+	if (!ctx->system_contexts) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+			goto cleanup;
+	}
+	ctx->total_remaining = total_calls;
+	uint32_t subs_idx = 0;
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem != NULL;
+	 subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		if (spdk_nvmf_subsystem_get_type(subsystem) != SPDK_NVMF_SUBTYPE_NVME) {
+			continue;
+		}
+		struct rpc_set_ana_states_all_subsystem_ctx * subs_ctx = &ctx->system_contexts[subs_idx++];
+		subs_ctx->subsystem = subsystem;
+		subs_ctx->parent = ctx;
+		ctx->remaining_subsystems ++;
+		spdk_nvmf_subsystem_pause(subsystem, 0, rpc_subsystem_paused_cb, subs_ctx);
+	}
+
+	SPDK_NOTICELOG("Number ana states changes to do totally %d, num subsystems %d \n",
+			ctx->total_remaining, ctx->remaining_subsystems);
+	free_rpc_nvmf_subsystem_set_ana_states_all(&req);
+	return;
+cleanup:
+	if (ctx) {
+		if(ctx->system_contexts)
+			free(ctx->system_contexts);
+		free(ctx);
+	}
+	free_rpc_nvmf_subsystem_set_ana_states_all(&req);
+}
+
+SPDK_RPC_REGISTER("nvmf_subsystem_set_ana_states_all", rpc_nvmf_subsystem_set_ana_states_all, SPDK_RPC_RUNTIME);

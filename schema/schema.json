@@ -611,6 +611,16 @@
       "name": "passphrase",
       "item_type": "string",
       "max_count": 255
+    },
+	{
+      "name": "ana_grpids",
+      "item_type": "string",
+      "max_count": 32
+    },
+    {
+      "name": "ana_states",
+      "item_type": "string",
+      "max_count": 32
     }
   ],
   "methods": [
@@ -6583,6 +6593,32 @@
           "type": "uint32",
           "required": true,
           "description": "number of blocks in chunk"
+        }
+      ]
+    },
+    {
+      "name": "nvmf_subsystem_set_ana_states_all",
+      "description": "Set ANA states across all NVMe-oF subsystems and listeners",
+      "params": [
+        {
+          "name": "tgt_name",
+          "type": "string",
+          "required": false,
+          "description": "Target name"
+        },
+        {
+          "name": "ana_grpids",
+          "type": "array",
+          "class": "ana_grpids",
+          "required": true,
+          "description": "List of ANA group IDs"
+        },
+        {
+          "name": "ana_states",
+          "type": "array",
+          "class": "ana_states",
+          "required": true,
+          "description": "List of corresponding ANA states"
         }
       ]
     },
