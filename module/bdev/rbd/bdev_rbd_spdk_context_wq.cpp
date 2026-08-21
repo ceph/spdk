@@ -6,7 +6,6 @@
 #include <rbd/asio/ContextWQ.hpp>
 #include <rados/librados.hpp>
 #include <atomic>
-#include <functional>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -101,7 +100,7 @@ namespace {
 struct ProducerPool;
 
 struct SpdkFnMsg {
-  std::function<void()> fn;
+  librbd::asio::ContextWQ::Work fn;
   SpdkFnMsg *next = nullptr;
   ProducerPool *owner = nullptr;
 };
@@ -124,7 +123,7 @@ get_producer_pool()
 
 /* Allocate a message on the producer thread, recycling where possible */
 static SpdkFnMsg *
-pool_alloc(std::function<void()> fn)
+pool_alloc(librbd::asio::ContextWQ::Work fn)
 {
   ProducerPool *p = get_producer_pool();
   SpdkFnMsg *m = p->free.load(std::memory_order_acquire);
