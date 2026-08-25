@@ -72,6 +72,7 @@ struct bdev_rbd {
 
 	uint64_t rbd_watch_handle;
 	bool rbd_read_only;
+	bool fail_io;
 	uint64_t reservation_version;
 	uint64_t reservation_epoch;
 	void *reservation_ns_context;
@@ -983,10 +984,22 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 {
 	struct spdk_thread *submit_td = spdk_io_channel_get_thread(ch);
 	struct bdev_rbd_io *rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
+	struct bdev_rbd *rbd = NULL;
 
 	rbd_io->submit_td = submit_td;
 	rbd_io->has_crc32c = false;  /* Initialize CRC32C fields */
 	rbd_io->precomputed_crc32c = 0;
+
+	if (bdev_io->bdev) {
+		rbd = (struct bdev_rbd *)bdev_io->bdev->ctxt;
+	}
+
+	if (rbd && rbd->fail_io) {
+		char *bdev_name = bdev_io->bdev->name;
+		SPDK_DEBUGLOG(bdev_rbd, "Fail IO of type %d for bdev %s\n", bdev_io->type, bdev_name ? bdev_name : "<n/a>");
+		bdev_rbd_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+		return;
+	}
 
 	/* check if CRC32C is available from the I/O options */
 	if (g_rbd_with_crc32c && bdev_io->u.bdev.has_crc32c) {
@@ -1171,6 +1184,8 @@ bdev_rbd_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w
 	}
 	spdk_json_write_named_string(w, "rbd_name", rbd->rbd_name);
 	spdk_json_write_named_uint32(w, "block_size", bdev->blocklen);
+	spdk_json_write_named_bool(w, "read_only", rbd->rbd_read_only);
+	spdk_json_write_named_bool(w, "fail_io", rbd->fail_io);
 	if (rbd->user_id) {
 		spdk_json_write_named_string(w, "user_id", rbd->user_id);
 	}
@@ -1635,6 +1650,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		const char *cluster_name,
 		const struct spdk_uuid *uuid,
 		bool read_only,
+		bool fail_io,
 		uint32_t encryption_entries_count,
 		const uint32_t *encryption_format,
 		const char **passphrase)
@@ -1716,6 +1732,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 	}
 
 	rbd->rbd_read_only = read_only;
+	rbd->fail_io = fail_io;
 	ret = bdev_rbd_init(rbd);
 	if (ret < 0) {
 		bdev_rbd_free(rbd);
