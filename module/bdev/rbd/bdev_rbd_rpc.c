@@ -64,7 +64,8 @@ static const struct spdk_json_object_decoder rpc_bdev_rbd_create_decoders[] = {
 	{"uuid", offsetof(struct rpc_bdev_rbd_create_ctx, uuid), spdk_json_decode_uuid, true},
 	{"read_only", offsetof(struct rpc_bdev_rbd_create_ctx, read_only), spdk_json_decode_bool, true},
 	{"encryption_format", offsetof(struct rpc_bdev_rbd_create_ctx, encryption_format), rpc_decode_encryption_format, true},
-	{"passphrase", offsetof(struct rpc_bdev_rbd_create_ctx, passphrase), rpc_decode_passphrase, true}
+	{"passphrase", offsetof(struct rpc_bdev_rbd_create_ctx, passphrase), rpc_decode_passphrase, true},
+	{"fail_io", offsetof(struct rpc_bdev_rbd_create_ctx, fail_io), spdk_json_decode_bool, true}
 };
 
 static void
@@ -86,7 +87,7 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 	}
 
 	if (req.passphrase.count != req.encryption_format.count) {
-		SPDK_DEBUGLOG(bdev_rbd, "passphrase count (%lu) must be equesl to format count (%lu)\n", req.passphrase.count, req.encryption_format.count);
+		SPDK_DEBUGLOG(bdev_rbd, "passphrase count (%lu) must be equal to format count (%lu)\n", req.passphrase.count, req.encryption_format.count);
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 						 "count mismatch");
 		goto cleanup;
@@ -94,7 +95,7 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 	rc = bdev_rbd_create(&bdev, req.name, req.user_id, req.pool_name, req.namespace_name,
 			     (const char *const *)req.config,
 			     req.rbd_name,
-			     req.block_size, req.cluster_name, &req.uuid, req.read_only,
+			     req.block_size, req.cluster_name, &req.uuid, req.read_only, req.fail_io,
 			     req.passphrase.count, req.encryption_format.items,
 			     (const char **)req.passphrase.items);
 	if (rc) {
