@@ -2270,6 +2270,11 @@
           "description": "set rbd bdev as read-only"
         },
         {
+          "name": "fail_io",
+          "type": "boolean",
+          "description": "Fail all IO for this bdev"
+        },
+        {
           "name": "encryption_format",
           "type": "array",
           "required": false,
