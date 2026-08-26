@@ -356,8 +356,8 @@ decode_subsystem_model_number(const struct spdk_json_val *val, void *out)
 }
 
 static const struct spdk_json_object_decoder rpc_nvmf_get_ctrl_io_stats_decoders[] = {
-	{"nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, nqn), spdk_json_decode_string },
-	{"host_nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, host_nqn), spdk_json_decode_string},
+	{"nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, nqn), spdk_json_decode_string, true },
+	{"host_nqn", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, host_nqn), spdk_json_decode_string, true},
 	{"tgt_name", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, tgt_name), spdk_json_decode_string, true},
 	{"reset", offsetof(struct rpc_nvmf_get_ctrl_io_stats_ctx, reset), spdk_json_decode_bool, true}
 };
@@ -385,7 +385,7 @@ rpc_collect_qp_stats(struct spdk_io_channel_iter *i)
 	}
 	pg = spdk_io_channel_get_ctx(ch);
 	TAILQ_FOREACH(qpair, &pg->qpairs, link) {
-		if (qpair->ctrlr != ctx->ctrlr) {
+		if (ctx->ctrlr && (qpair->ctrlr != ctx->ctrlr)) {
 			continue;
 		}
 		struct qp_io_stats *stats = NULL;
@@ -455,31 +455,35 @@ rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
 						 "Unable to find a target.");
 		goto cleanup;
 	}
-	if (!req.nqn || !req.host_nqn) {
+	/* Require both nqn and host_nqn to be provided together, or both omitted */
+	if ((req.nqn != NULL) ^ (req.host_nqn != NULL)) {
 		spdk_jsonrpc_send_error_response(request,
-						SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-						"nqn and host_nqn are required");
+						 SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Both nqn and host_nqn must be provided, or both omitted");
 		goto cleanup;
 	}
-	if (req.nqn) {
+	/* Allocate RPC context */
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request,
+						 SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Out of memory");
+		goto cleanup;
+	}
+	spdk_nvmf_stats_reset_qp(&ctx->stats);
+
+	/* Filter by specific controller if NQNs are provided */
+	if (req.nqn && req.host_nqn) {
 		subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req.nqn);
 		if (!subsystem) {
 			SPDK_ERRLOG("subsystem '%s' does not exist\n", req.nqn);
 			spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+			free(ctx);
 			goto cleanup;
 		}
 		TAILQ_FOREACH(ctrlr, &subsystem->ctrlrs, link) {
 			if (strcmp(ctrlr->hostnqn, req.host_nqn) == 0) {
-				/* Found controller */
 				found_ctrl = true;
-				ctx = calloc(1, sizeof(*ctx));
-				if (!ctx) {
-					spdk_jsonrpc_send_error_response(request,
-									 SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-									 "Out of memory");
-					goto cleanup;
-				}
-				spdk_nvmf_stats_reset_qp(&ctx->stats);
 				ctx->ctrlr = ctrlr;
 				break;
 			}
@@ -487,8 +491,12 @@ rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
 		if (!found_ctrl) {
 			SPDK_ERRLOG("controller does not exist for host '%s'\n", req.host_nqn);
 			spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+			free(ctx);
 			goto cleanup;
 		}
+	} else {
+		/* Target-wide stats across all controllers */
+		ctx->ctrlr = NULL;
 	}
 	ctx->request = request;
 	ctx->reset_stats = req.reset;
@@ -499,7 +507,6 @@ rpc_nvmf_get_ctrl_io_stats(struct spdk_jsonrpc_request *request,
 cleanup:
 	free_rpc_nvmf_get_ctrl_io_stats(&req);
 }
-
 SPDK_RPC_REGISTER("nvmf_get_ctrl_io_stats", rpc_nvmf_get_ctrl_io_stats, SPDK_RPC_RUNTIME)
 
 static const struct spdk_json_object_decoder rpc_nvmf_enable_ctrl_io_stats_decoders[] = {

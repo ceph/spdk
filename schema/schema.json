@@ -4127,13 +4127,13 @@
         {
           "name": "nqn",
           "type": "string",
-          "required": true,
+          "required": false,
           "description": "Subsystem NQN."
         },
         {
           "name": "host_nqn",
           "type": "string",
-          "required": true,
+          "required": false,
           "description": "Host NQN."
         },
         {

@@ -152,12 +152,15 @@ def add_parser(subparsers):
     p.set_defaults(func=nvmf_get_subsystems)
 
     def nvmf_get_ctrl_io_stats(args):
+        if bool(args.nqn) ^ bool(args.host_nqn):
+            print("Both --nqn and --host-nqn must be provided together, or both omitted.", file=sys.stderr)
+            exit(1)
         print_dict(args.client.nvmf_get_ctrl_io_stats(tgt_name=args.tgt_name, nqn=args.nqn, host_nqn=args.host_nqn, reset=args.reset))
 
     p = subparsers.add_parser('nvmf_get_ctrl_io_stats', help='Display IO statistics for a specific NVMe-oF controller')
     p.add_argument('-g', '--tgt-name', help='The name of the NVMe-oF target', type=str)
-    p.add_argument('-n', '--nqn', help='Subsystem NQN', type=str, required=True)
-    p.add_argument('-H', '--host-nqn', help='Host NQN', type=str, required=True)
+    p.add_argument('-n', '--nqn', help='Subsystem NQN', type=str, required=False)
+    p.add_argument('-H', '--host-nqn', help='Host NQN', type=str, required=False)
     p.add_argument('-r', '--reset', action='store_true', help=""" reset statistics of the controller""")
     p.set_defaults(func=nvmf_get_ctrl_io_stats)
     
