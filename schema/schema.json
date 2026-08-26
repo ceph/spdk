@@ -4132,19 +4132,24 @@
         {
           "name": "nqn",
           "type": "string",
-          "required": true,
+          "required": false,
           "description": "Subsystem NQN."
         },
         {
           "name": "host_nqn",
           "type": "string",
-          "required": true,
+          "required": false,
           "description": "Host NQN."
         },
         {
           "name": "reset",
           "type": "boolean",
           "description": "Reset NVMf IO statistics of controller"
+        },
+        {
+          "name": "verbose_stats",
+          "type": "boolean",
+          "description": "Enable verbose per-bucket statistics"
         }
       ]
     },

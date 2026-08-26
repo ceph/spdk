@@ -152,13 +152,16 @@ def add_parser(subparsers):
     p.set_defaults(func=nvmf_get_subsystems)
 
     def nvmf_get_ctrl_io_stats(args):
-        print_dict(args.client.nvmf_get_ctrl_io_stats(tgt_name=args.tgt_name, nqn=args.nqn, host_nqn=args.host_nqn, reset=args.reset))
+        print_dict(args.client.nvmf_get_ctrl_io_stats(tgt_name=args.tgt_name, nqn=args.nqn, host_nqn=args.host_nqn,
+                                                      reset=args.reset, verbose_stats=args.verbose_stats))
 
     p = subparsers.add_parser('nvmf_get_ctrl_io_stats', help='Display IO statistics for a specific NVMe-oF controller')
     p.add_argument('-g', '--tgt-name', help='The name of the NVMe-oF target', type=str)
-    p.add_argument('-n', '--nqn', help='Subsystem NQN', type=str, required=True)
-    p.add_argument('-H', '--host-nqn', help='Host NQN', type=str, required=True)
+    p.add_argument('-n', '--nqn', help='Subsystem NQN', type=str, required=False)
+    p.add_argument('-H', '--host-nqn', help='Host NQN', type=str, required=False)
     p.add_argument('-r', '--reset', action='store_true', help=""" reset statistics of the controller""")
+    p.add_argument('-v', '--verbose-stats', action='store_true',
+                    help=""" Enable verbose per-bucket statistics""")
     p.set_defaults(func=nvmf_get_ctrl_io_stats)
     
     def nvmf_enable_ctrl_io_stats(args):
