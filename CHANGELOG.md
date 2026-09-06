@@ -2,6 +2,10 @@
 
 ## v26.09: (Upcoming Release)
 
+### nvmf
+
+Added `nvmf_subsystem_set_ana_states_all` RPC method and CLI support to set ANA states across all subsystems in chunks.
+
 ## v26.05
 
 ### accel
