@@ -205,6 +205,10 @@ Removed the deprecated `spdk_sock_group_poll_count()` API. Use `spdk_sock_group_
 Removed the legacy zero-copy receive APIs `spdk_sock_recv_next()`,
 `spdk_sock_group_provide_buf()`, and `spdk_sock_group_get_buf()`.
 
+### nvmf
+
+Added `nvmf_subsystem_set_ana_states_all` RPC method and CLI support to set ANA states across all subsystems in chunks.
+
 ## v26.05
 
 ### accel
