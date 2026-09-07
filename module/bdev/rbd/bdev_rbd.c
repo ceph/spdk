@@ -1383,6 +1383,7 @@ bdev_rbd_get_clusters_info(struct spdk_jsonrpc_request *request, const char *nam
 }
 
 int  bdev_rbd_ns_reservation_update_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx **ctx);
+//int bdev_rbd_ns_reservation_update_json(struct spdk_bdev *bdev, struct spdk_bdev_io *bdev_io, struct spdk_json_write_ctx **ctx);
 int  bdev_rbd_ns_reservation_load_json(struct spdk_bdev *bdev, void **json, int *json_size);
 bool bdev_rbd_ns_is_ptpl_enabled(struct spdk_bdev *bdev, void *ns, int (*cbk)(void *ns));
 void bdev_rbd_ns_increment_epoch(struct spdk_bdev *bdev);
@@ -1896,38 +1897,148 @@ bdev_rbd_ns_increment_epoch(struct spdk_bdev *bdev)
 	rbd->reservation_epoch ++;
 }
 
+struct rbd_reservation_req_ctx {
+	struct bdev_rbd *rbd;
+	struct spdk_thread *thread;
+	char *reply_buf;
+	size_t reply_buf_len;
+	uint64_t target_epoch;
+	int status;
+};
+
+/* Executed on SPDK Reactor Thread */
+static void
+rbd_reservation_notify_test_on_reactor(void *arg)
+{
+	struct rbd_reservation_req_ctx *req_ctx = arg;
+
+	SPDK_NOTICELOG("=== TEST SUCCESS: RADOS Notify callback fired on SPDK reactor for epoch %" PRIu64 " (status: %d) ===\n",
+		       req_ctx->target_epoch, req_ctx->status);
+
+	if (req_ctx->reply_buf) {
+		SPDK_NOTICELOG("Callback reply number bytes %d .Dumping:\n",req_ctx->reply_buf_len);
+		int i;
+		for (i = 0; i < req_ctx->reply_buf_len; i++) {
+			if (i > 0 && (i % 16 == 0)) {
+				SPDK_PRINTF("\n");
+			}
+			SPDK_PRINTF("%02x ", (unsigned char)req_ctx->reply_buf[i]);
+		}
+		SPDK_PRINTF("\n");
+		rados_buffer_free(req_ctx->reply_buf);
+	}
+	free(req_ctx);
+}
+
+/* Executed on Ceph Finisher Thread */
+static void
+rbd_reservation_notify_cb(rados_completion_t c, void *arg)
+{
+	struct rbd_reservation_req_ctx *req_ctx = arg;
+	//SPDK_NOTICELOG("===  RADOS Notify callback start\n");
+	req_ctx->status = (rados_aio_is_complete(c) < 0) ? -EIO : 0;
+	rados_aio_release(c);
+
+	/* Safely post event back to SPDK thread to print the log */
+	spdk_thread_send_msg(req_ctx->thread, rbd_reservation_notify_test_on_reactor, req_ctx);
+}
+
+static rados_ioctx_t
+bdev_rbd_get_io_ctx(struct bdev_rbd *rbd)
+{
+	if (rbd->cluster_name) {
+		if (rbd->rados_ctx.ctx == NULL) {
+			return NULL;
+		}
+		return rbd->rados_ctx.ctx->io_ctx;
+	}
+	return rbd->rados_ctx.io_ctx;
+}
+
 static int
 metadata_json_write_cbk(void *cb_ctx, const void *data, size_t size)
 {
-	struct bdev_rbd *rbd = (struct bdev_rbd *)cb_ctx;
+	struct rbd_reservation_req_ctx *req_ctx = (struct rbd_reservation_req_ctx *)cb_ctx;
+	struct bdev_rbd *rbd = req_ctx->rbd;
+	rados_completion_t comp;
+	rados_ioctx_t io_ctx;
+	char id[256] = {0};
+	char header_oid[300] = {0};
+	int rc;
+
 	if (size == 0) {
-		SPDK_ERRLOG("Failed to set metadata  size = 0\n");
 		return -ENOENT;
 	}
-	int rc = rbd_metadata_set(rbd->image, RESERVATION_KEY, (const char *)data);
+
+	/* Capture SPDK reactor thread context */
+	req_ctx->thread = spdk_get_thread();
+
+	/* 1. Update local metadata in Ceph */
+	rc = rbd_metadata_set(rbd->image, RESERVATION_KEY, (const char *)data);
 	if (rc < 0) {
-		SPDK_ERRLOG("Failed to set metadata  key = reservation_key\n");
-		return -ENOENT;
+		return rc;
 	}
-	SPDK_INFOLOG(reservation, "updated metadata by reservation_key %s\n", (const char *)data);
-	return rc;
+
+	/* 2. Create RADOS async completion */
+	rc = rados_aio_create_completion(req_ctx, rbd_reservation_notify_cb, NULL, &comp);
+	if (rc < 0) {
+		return rc;
+	}
+
+	/* 3. Determine header OID */
+	if (rbd_get_id(rbd->image, id, sizeof(id)) == 0 && id[0] != '\0') {
+		snprintf(header_oid, sizeof(header_oid), "rbd_header.%s", id);
+	} else {
+		snprintf(header_oid, sizeof(header_oid), "rbd_header.%s", rbd->rbd_name);
+	}
+
+	/* 1. Get the correct rados_ioctx_t from the union */
+	io_ctx = bdev_rbd_get_io_ctx(rbd);
+	if (!io_ctx) {
+		SPDK_ERRLOG("Failed to obtain valid RADOS io_ctx for rbd image %s\n", rbd->rbd_name);
+		return -EINVAL;
+	}
+
+	/* 4. Issue rados_aio_notify with valid pointers for buffer parameters */
+	rc = rados_aio_notify(io_ctx, header_oid, comp,
+			      (const char *)data, (int)size, 3000,
+			      &req_ctx->reply_buf, &req_ctx->reply_buf_len);
+	if (rc < 0) {
+		rados_aio_release(comp);
+		return rc;
+	}
+
+	return 0;
 }
 
 int
-bdev_rbd_ns_reservation_update_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx **ctx)
+bdev_rbd_ns_reservation_update_json(struct spdk_bdev *bdev, /*void *cb_arg,*/
+				     struct spdk_json_write_ctx **ctx)
 {
 	struct bdev_rbd *rbd = (struct bdev_rbd *)bdev;
-	*ctx = spdk_json_write_begin(metadata_json_write_cbk, (void *)rbd, 0);
-	if (*ctx == NULL) {
+	struct rbd_reservation_req_ctx *req_ctx;
+
+	req_ctx = calloc(1, sizeof(*req_ctx));
+	if (!req_ctx) {
 		return -ENOMEM;
 	}
-	rbd->reservation_epoch ++;
+
+	rbd->reservation_epoch++;
+	req_ctx->rbd = rbd;
+	//req_ctx->cb_arg = cb_arg;           /* Consistently assign to cb_arg */
+	req_ctx->target_epoch = rbd->reservation_epoch;
+
+	*ctx = spdk_json_write_begin(metadata_json_write_cbk, (void *)req_ctx, 0);
+	if (*ctx == NULL) {
+		free(req_ctx);
+		return -ENOMEM;
+	}
+	SPDK_NOTICELOG("rbd starts reservation-update on epoch %" PRIu64"\n", rbd->reservation_epoch);
 	spdk_json_write_object_begin(*ctx);
 	spdk_json_write_named_uint64(*ctx, "version", rbd->reservation_version);
 	spdk_json_write_named_uint64(*ctx, "epoch", rbd->reservation_epoch);
 	spdk_json_write_named_string(*ctx, "cluster_id", rbd->cluster_fsid);
-	SPDK_INFOLOG(reservation, "updated metadata epoch %lu  for bdev %s\n", rbd->reservation_epoch,
-		     bdev->name);
+
 	return 0;
 }
 
