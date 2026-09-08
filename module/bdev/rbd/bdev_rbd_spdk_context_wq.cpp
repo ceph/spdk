@@ -198,8 +198,39 @@ reactor_fallback_handler(void *arg)
   pool_free(m);
 }
 
+/* Deliver work to a reactor: lock-free ring first, message fallback. */
+static void
+dispatch_to_reactor(ReactorDispatch *rd, struct spdk_thread *reactor,
+                    librbd::asio::ContextWQ::Work fn)
+{
+  auto *msg = pool_alloc(std::move(fn));
+
+  // Fast path: lock-free enqueue into the reactor's MP/SC work ring. The reactor
+  // poller drains it.
+  if (rd != nullptr) {
+    void *item = msg;
+    if (spdk_ring_enqueue(rd->work_ring, &item, 1, NULL) == 1) {
+      return;
+    }
+    // Ring full: fall through to the legacy path to guarantee forward progress.
+  }
+
+  // Fallback: legacy cross-thread message. Still correct, just slower.
+  int rc = spdk_thread_send_msg(reactor, reactor_fallback_handler, msg);
+  if (rc != 0) {
+    pool_free(msg);
+    SPDK_ERRLOG("bdev_rbd: dispatch_to_reactor: spdk_thread_send_msg failed rc=%d\n", rc);
+  }
+}
+
 static std::mutex g_dispatch_mutex;
 static std::unordered_map<struct spdk_thread *, ReactorDispatch *> g_dispatch_map;
+
+/*
+ * Dispatch context of the calling thread. Resolved once per thread so that
+ * channel lookups on the submit path take neither a lock nor a map lookup.
+ */
+thread_local ReactorDispatch *t_self_dispatch = nullptr;
 
 /*
  * Get (or lazily create) the dispatch context for a reactor. Reactors live for
@@ -269,25 +300,30 @@ SpdkContextWQ::~SpdkContextWQ() {
 }
 
 void SpdkContextWQ::send_fn(Work fn) {
-  auto *msg = pool_alloc(std::move(fn));
-  auto *rd = static_cast<ReactorDispatch *>(m_dispatch);
+  dispatch_to_reactor(static_cast<ReactorDispatch *>(m_dispatch),
+                      m_reactor_thread, std::move(fn));
+}
 
-  // Fast path: lock-free enqueue into the reactor's MP/SC work ring. The reactor
-  // poller drains it.
-  if (rd != nullptr) {
-    void *item = msg;
-    if (spdk_ring_enqueue(rd->work_ring, &item, 1, NULL) == 1) {
-      return;
-    }
-    // Ring full: fall through to the legacy path to guarantee forward progress.
+ContextWQ::Channel SpdkContextWQ::current_channel() const {
+  struct spdk_thread *self = spdk_get_thread();
+  if (self == nullptr) {
+    return nullptr;
   }
 
-  // Fallback: legacy cross-thread message. Still correct, just slower.
-  int rc = spdk_thread_send_msg(m_reactor_thread, reactor_fallback_handler, msg);
-  if (rc != 0) {
-    pool_free(msg);
-    SPDK_ERRLOG("SpdkContextWQ::send_fn: fallback spdk_thread_send_msg failed rc=%d\n", rc);
+  if (t_self_dispatch == nullptr || t_self_dispatch->reactor != self) {
+    t_self_dispatch = get_reactor_dispatch(self);
   }
+  return t_self_dispatch;
+}
+
+void SpdkContextWQ::post_channel(Channel channel, Work fn) {
+  auto *rd = static_cast<ReactorDispatch *>(channel);
+  if (rd == nullptr) {
+    send_fn(std::move(fn));
+    return;
+  }
+
+  dispatch_to_reactor(rd, rd->reactor, std::move(fn));
 }
 
 void SpdkContextWQ::post(Work fn) {
@@ -306,8 +342,27 @@ void SpdkContextWQ::post_serial(Work fn) {
   send_fn(std::move(fn));
 }
 
+/*
+ * Serial work is ordered per channel rather than globally. SPDK runs each
+ * spdk_thread single-threaded, so two functors on one channel never overlap,
+ * which is the guarantee AioCompletion::complete_external_callback() needs.
+ * Running inline on any reactor keeps a channel-bound completion on the thread
+ * that submitted the op, so bdev_rbd_io_complete() can complete the bdev_io
+ * without hopping to the image's WQ reactor and back.
+ *
+ * Off-reactor callers (e.g. msgr workers) still go to m_reactor_thread.
+ *
+ * post_serial() is deliberately left funnelling to m_reactor_thread: its
+ * callers are the cold zero-pending path and ContextWQ::queue(), whose
+ * drain() accounting expects a single consumer.
+ */
 void SpdkContextWQ::dispatch_serial(Work fn) {
-  dispatch(std::move(fn));
+  if (spdk_get_thread() != nullptr) {
+    fn();
+    return;
+  }
+
+  send_fn(std::move(fn));
 }
 
 void SpdkContextWQ::drain() {

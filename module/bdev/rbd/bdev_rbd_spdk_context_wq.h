@@ -77,7 +77,16 @@ public:
   void post(Work fn) override;
   void dispatch(Work fn) override;
   void post_serial(Work fn) override;
+
+  // Ordered per channel, not globally: runs inline on any reactor, since SPDK
+  // executes each spdk_thread single-threaded.
   void dispatch_serial(Work fn) override;
+
+  // A channel is the dispatch context of one spdk_thread. Completions bound
+  // to a channel are delivered back to the thread that submitted the op,
+  // which lets bdev_rbd_io_complete() take its inline branch.
+  Channel current_channel() const override;
+  void post_channel(Channel channel, Work fn) override;
 
 private:
   struct spdk_thread* m_reactor_thread;
