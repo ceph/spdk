@@ -82,6 +82,10 @@ public:
   // executes each spdk_thread single-threaded.
   void dispatch_serial(Work fn) override;
 
+  // Off-reactor: deliver to @p channel (submit reactor) when set, else the
+  // image WQ reactor. On-reactor: still runs inline.
+  void dispatch_serial_channel(Channel channel, Work fn) override;
+
   // A channel is the dispatch context of one spdk_thread. Completions bound
   // to a channel are delivered back to the thread that submitted the op,
   // which lets bdev_rbd_io_complete() take its inline branch.

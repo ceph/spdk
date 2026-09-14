@@ -350,11 +350,13 @@ void SpdkContextWQ::post_serial(Work fn) {
  * that submitted the op, so bdev_rbd_io_complete() can complete the bdev_io
  * without hopping to the image's WQ reactor and back.
  *
- * Off-reactor callers (e.g. msgr workers) still go to m_reactor_thread.
+ * Off-reactor callers (e.g. msgr workers) without a pinned channel still go
+ * to m_reactor_thread. Prefer dispatch_serial_channel() when the submit
+ * channel is known.
  *
  * post_serial() is deliberately left funnelling to m_reactor_thread: its
- * callers are the cold zero-pending path and ContextWQ::queue(), whose
- * drain() accounting expects a single consumer.
+ * callers are the cold zero-pending path (when unpinned) and ContextWQ::queue()
+ * off-channel, whose drain() accounting expects a single consumer.
  */
 void SpdkContextWQ::dispatch_serial(Work fn) {
   if (spdk_get_thread() != nullptr) {
@@ -363,6 +365,15 @@ void SpdkContextWQ::dispatch_serial(Work fn) {
   }
 
   send_fn(std::move(fn));
+}
+
+void SpdkContextWQ::dispatch_serial_channel(Channel channel, Work fn) {
+  if (spdk_get_thread() != nullptr) {
+    fn();
+    return;
+  }
+
+  post_channel(channel, std::move(fn));
 }
 
 void SpdkContextWQ::drain() {
