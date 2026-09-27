@@ -32,7 +32,7 @@ int bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_
 		    const char *const *config,
 		    const char *rbd_name, uint32_t block_size, const char *cluster_name,
 		    const struct spdk_uuid *uuid, bool read_only, bool fail_io,
-		    uint32_t encryption_entries_count,
+		    uint32_t size_delta, uint32_t encryption_entries_count,
 		    const uint32_t *encryption_format, const char **passphrase);
 /**
  * Delete rbd bdev.
