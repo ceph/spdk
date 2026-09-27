@@ -2675,6 +2675,11 @@
           "description": "Fail all IO for this bdev"
         },
         {
+          "name": "size_delta",
+          "type": "uint32",
+          "description": "Reduce image size to accommodate for encryption tables size"
+        },
+        {
           "name": "encryption_format",
           "type": "array",
           "class": "encryption_format",
