@@ -21,6 +21,7 @@ struct rpc_create_rbd {
 	struct spdk_uuid uuid;
 	bool read_only;
 	bool fail_io;
+	uint32_t size_delta;
 	uint32_t encryption_entries_count;
 	uint32_t *encryption_format;
 	char **passphrase;
@@ -131,7 +132,8 @@ static const struct spdk_json_object_decoder rpc_create_rbd_decoders[] = {
 	{"read_only", offsetof(struct rpc_create_rbd, read_only), spdk_json_decode_bool, true},
 	{"encryption_format", offsetof(struct rpc_create_rbd, encryption_format), bdev_rbd_decode_encryption_format, true},
 	{"passphrase", offsetof(struct rpc_create_rbd, passphrase), bdev_rbd_decode_passphrase, true},
-	{"fail_io", offsetof(struct rpc_create_rbd, fail_io), spdk_json_decode_bool, true}
+	{"fail_io", offsetof(struct rpc_create_rbd, fail_io), spdk_json_decode_bool, true},
+	{"size_delta", offsetof(struct rpc_create_rbd, size_delta), spdk_json_decode_uint32, true}
 };
 
 static void
@@ -160,7 +162,7 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 			     (const char *const *)req.config,
 			     req.rbd_name,
 			     req.block_size, req.cluster_name, &req.uuid, req.read_only, req.fail_io,
-			     req.encryption_entries_count, req.encryption_format,
+			     req.size_delta, req.encryption_entries_count, req.encryption_format,
 			     (const char **)req.passphrase);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
