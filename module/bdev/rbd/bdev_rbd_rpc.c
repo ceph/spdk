@@ -65,7 +65,8 @@ static const struct spdk_json_object_decoder rpc_bdev_rbd_create_decoders[] = {
 	{"read_only", offsetof(struct rpc_bdev_rbd_create_ctx, read_only), spdk_json_decode_bool, true},
 	{"encryption_format", offsetof(struct rpc_bdev_rbd_create_ctx, encryption_format), rpc_decode_encryption_format, true},
 	{"passphrase", offsetof(struct rpc_bdev_rbd_create_ctx, passphrase), rpc_decode_passphrase, true},
-	{"fail_io", offsetof(struct rpc_bdev_rbd_create_ctx, fail_io), spdk_json_decode_bool, true}
+	{"fail_io", offsetof(struct rpc_bdev_rbd_create_ctx, fail_io), spdk_json_decode_bool, true},
+	{"size_delta", offsetof(struct rpc_bdev_rbd_create_ctx, size_delta), spdk_json_decode_uint32, true}
 };
 
 static void
@@ -96,7 +97,7 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 			     (const char *const *)req.config,
 			     req.rbd_name,
 			     req.block_size, req.cluster_name, &req.uuid, req.read_only, req.fail_io,
-			     req.passphrase.count, req.encryption_format.items,
+			     req.size_delta, req.passphrase.count, req.encryption_format.items,
 			     (const char **)req.passphrase.items);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
