@@ -873,7 +873,8 @@ def add_parser(subparsers):
                                             read_only=args.read_only,
                                             encryption_format=args.encryption_format,
                                             passphrase=args.passphrase,
-                                            fail_io=args.fail_io))
+                                            fail_io=args.fail_io,
+                                            size_delta=args.size_delta))
 
     p = subparsers.add_parser('bdev_rbd_create', help='Add a bdev with ceph rbd backend')
     p.add_argument('-b', '--name', help="Name of the bdev")
@@ -890,6 +891,7 @@ def add_parser(subparsers):
     p.add_argument('-e', '--encryption-format', nargs='+', help="Encryption format(s) of the bdev")
     p.add_argument('-p', '--passphrase', nargs='+', help="Pass phrase(s) for encrypted bdevs")
     p.add_argument('--fail-io', action='store_true', help='Fail all IO for this bdev')
+    p.add_argument('--size-delta', help='Redue image size to accommodate for encryption tables size', type=int)
     p.set_defaults(func=bdev_rbd_create)
 
     def bdev_rbd_delete(args):
