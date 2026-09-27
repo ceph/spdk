@@ -73,6 +73,7 @@ struct bdev_rbd {
 	uint64_t rbd_watch_handle;
 	bool rbd_read_only;
 	bool fail_io;
+	uint32_t size_delta;
 	uint64_t reservation_version;
 	uint64_t reservation_epoch;
 	void *reservation_ns_context;
@@ -135,6 +136,13 @@ _rbd_update_callback(void *arg)
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed getting size\n");
 	} else {
+		if (rbd->size_delta > current_size_in_bytes) {
+			SPDK_ERRLOG("Requested image size is %lu bytes, which is not big enough to reduce %u bytes\n",
+					current_size_in_bytes, rbd->size_delta);
+		}
+		else {
+			current_size_in_bytes -= rbd->size_delta;
+		}
 		rc = spdk_bdev_notify_blockcnt_change(&rbd->disk, current_size_in_bytes / rbd->disk.blocklen);
 		if (rc != 0) {
 			SPDK_ERRLOG("failed to notify block cnt change.\n");
@@ -600,12 +608,16 @@ bdev_rbd_init_context(void *arg)
 		formats_string = calloc(rbd->encryption_entries_count, strlen("LUKSx") + 1);
 		if (!formats_string) {
 			SPDK_ERRLOG("Cannot allocate memory for encryption formats string\n");
+			rbd_close(rbd->image);
+			rbd->image = NULL;
 			return NULL;
 		}
 		specs = calloc(rbd->encryption_entries_count, sizeof(*specs));
 		if (!specs) {
 			SPDK_ERRLOG("Cannot allocate memory for encryption specs\n");
 			free(formats_string);
+			rbd_close(rbd->image);
+			rbd->image = NULL;
 			return NULL;
 		}
 		for (i = 0; i < rbd->encryption_entries_count; i++) {
@@ -617,6 +629,8 @@ bdev_rbd_init_context(void *arg)
 				SPDK_ERRLOG("Invalid encryption format %d\n", rbd->encryption_format[i]);
 				bdev_rbd_free_encryption_specs(specs, rbd->encryption_entries_count);
 				free(formats_string);
+				rbd_close(rbd->image);
+				rbd->image = NULL;
 				return NULL;
 			}
 		}
@@ -629,6 +643,8 @@ bdev_rbd_init_context(void *arg)
 			SPDK_ERRLOG("Error %d trying to encryption load image %s/%s using format(s) %s\n", rc,
 					rbd->pool_name, rbd->rbd_name, formats_string);
 			free(formats_string);
+			rbd_close(rbd->image);
+			rbd->image = NULL;
 			return NULL;
 		}
 		free(formats_string);
@@ -642,7 +658,24 @@ bdev_rbd_init_context(void *arg)
 	rc = rbd_stat(rbd->image, &rbd->info, sizeof(rbd->info));
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to stat specified rbd device\n");
+		rbd_close(rbd->image);
+		rbd->image = NULL;
 		return NULL;
+	}
+
+	if (rbd->size_delta > 0) {
+		if (rbd->info.size > rbd->size_delta) {
+			SPDK_INFOLOG(bdev_rbd, "Will decrease image size by %u bytes to accommodate for encryption tables size\n", rbd->size_delta);
+			rbd->info.size -= rbd->size_delta;
+		}
+		else {
+			SPDK_ERRLOG("Image size is %lu bytes, which is not big enough to reduce %u bytes\n",
+					rbd->info.size, rbd->size_delta);
+			rbd_close(rbd->image);
+			rbd->image = NULL;
+			memset(&rbd->info, 0, sizeof(rbd->info));
+			return NULL;
+		}
 	}
 
 	return arg;
@@ -1164,6 +1197,18 @@ bdev_rbd_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 
 	spdk_json_write_named_string(w, "rbd_name", rbd_bdev->rbd_name);
 
+	if (rbd_bdev->size_delta > 0) {
+		spdk_json_write_named_uint32(w, "size_delta", rbd_bdev->size_delta);
+	}
+
+	if (rbd_bdev->rbd_read_only) {
+		spdk_json_write_named_bool(w, "read_only", rbd_bdev->rbd_read_only);
+	}
+
+	if (rbd_bdev->fail_io) {
+		spdk_json_write_named_bool(w, "fail_io", rbd_bdev->fail_io);
+	}
+
 	if (rbd_bdev->cluster_name) {
 		bdev_rbd_cluster_dump_entry(rbd_bdev->cluster_name, w);
 		goto end;
@@ -1675,6 +1720,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		const struct spdk_uuid *uuid,
 		bool read_only,
 		bool fail_io,
+		uint32_t size_delta,
 		uint32_t encryption_entries_count,
 		const uint32_t *encryption_format,
 		const char **passphrase)
@@ -1757,6 +1803,7 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 
 	rbd->rbd_read_only = read_only;
 	rbd->fail_io = fail_io;
+	rbd->size_delta = size_delta;
 	ret = bdev_rbd_init(rbd);
 	if (ret < 0) {
 		bdev_rbd_free(rbd);
@@ -1866,11 +1913,18 @@ bdev_rbd_resize(const char *name, const uint64_t new_size_in_mb)
 
 	new_size_in_byte = new_size_in_mb * 1024 * 1024;
 	if (new_size_in_byte > 0) {
+		if (rbd->size_delta > new_size_in_byte) {
+			SPDK_ERRLOG("Requested image size is %lu bytes, which is not big enough to reduce %u bytes\n",
+					new_size_in_byte, rbd->size_delta);
+			rc = -EINVAL;
+			goto exit;
+		}
 		rc = rbd_resize(rbd->image, new_size_in_byte);
 		if (rc != 0) {
 			SPDK_ERRLOG("failed to resize the ceph bdev.\n");
 			goto exit;
 		}
+		new_size_in_byte -= rbd->size_delta;
 	}
 	else {
 		new_size_in_byte = current_size_in_bytes;
