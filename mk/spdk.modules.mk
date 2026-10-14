@@ -74,7 +74,7 @@ endif
 
 ifeq ($(CONFIG_RBD),y)
 BLOCKDEV_MODULES_LIST += bdev_rbd
-BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd -lstdc++
 endif
 
 ifeq ($(CONFIG_DAOS),y)

@@ -2431,7 +2431,7 @@ methods:
         required: true
         description: Name of the NVMe bdev controller
   - name: bdev_rbd_register_cluster
-    description: This method is available only if SPDK was build with Ceph RBD support.
+    description: Register a Rados cluster object.
     result:
       type: string
       description: Name of newly created Rados cluster object.
@@ -2457,7 +2457,6 @@ methods:
         description: Core mask for librados IO context threads
   - name: bdev_rbd_unregister_cluster
     description: |
-      This method is available only if SPDK was build with Ceph RBD support.
       If there is still rbd bdev using this cluster, the unregisteration operation
       will fail.
     result:
@@ -2469,7 +2468,7 @@ methods:
         required: true
         description: Rados cluster object name
   - name: bdev_rbd_wait_for_latest_osdmap
-    description: This method is available only if SPDK was build with Ceph RBD support.
+    description: Wait for the latest OSD map on a Rados cluster.
     private: true
     params:
       - name: name
@@ -2477,7 +2476,7 @@ methods:
         required: true
         description: Rados cluster object name
   - name: bdev_rbd_get_clusters_info
-    description: This method is available only if SPDK was build with Ceph RBD support.
+    description: Get Rados cluster object info.
     params:
       - name: name
         type: string
@@ -2485,8 +2484,6 @@ methods:
   - name: bdev_rbd_create
     description: |
       Create @ref bdev_config_rbd bdev
-
-      This method is available only if SPDK was build with Ceph RBD support.
     result:
       type: string
       description: Name of newly created bdev.
@@ -2541,26 +2538,53 @@ methods:
   - name: bdev_rbd_get_with_crc32c
     description: |
       Get the state of CRC32 usage in RBD
-
-      This method is available only if SPDK was build with Ceph RBD support.
     private: true
     params: []
   - name: bdev_rbd_set_with_crc32c
     description: |
       Enable or disable CRC32 usage in RBD
-
-      This method is available only if SPDK was build with Ceph RBD support.
     private: true
     params:
       - name: enable
         type: boolean
         required: true
         description: Enable or disable CRC32
+  - name: bdev_rbd_get_with_spdk_wq
+    description: |
+      Get the state of the SPDK reactor work queue for RBD
+    private: true
+    params: []
+  - name: bdev_rbd_set_with_spdk_wq
+    description: |
+      Enable or disable the SPDK reactor work queue for RBD
+    private: true
+    params:
+      - name: enable
+        type: boolean
+        required: true
+        description: Enable or disable the SPDK reactor work queue
+  - name: bdev_rbd_get_wq_options
+    description: |
+      Get SpdkContextWQ options
+    private: true
+    params: []
+  - name: bdev_rbd_set_wq_options
+    description: |
+      Set SpdkContextWQ options
+    private: true
+    params:
+      - name: ring_size
+        type: uint32
+        required: true
+        description: SpdkContextWQ per-reactor work-ring size (power of two, before first ring create)
+  - name: bdev_rbd_get_wq_stats
+    description: |
+      Get SpdkContextWQ per-reactor ring statistics
+    private: true
+    params: []
   - name: bdev_rbd_delete
     description: |
       Delete @ref bdev_config_rbd bdev
-
-      This method is available only if SPDK was build with Ceph RBD support.
     result:
       type: boolean
       description: '`true` if bdev with provided name was deleted or `false` otherwise.'
@@ -2572,8 +2596,6 @@ methods:
   - name: bdev_rbd_resize
     description: |
       Resize @ref bdev_config_rbd bdev
-
-      This method is available only if SPDK was build with Ceph RBD support.
     result:
       type: boolean
       description: '`true` if bdev with provided name was resized or `false` otherwise.'
