@@ -456,6 +456,7 @@ struct spdk_nvmf_subsystem {
 	uint32_t					auth_seqnum;
 	/* Flag indicating transient holds are active for Step 2 */
 	bool transient_hold_enabled;
+	void *transient_hold_tracker;
 
 	/* SPDK non-blocking timer handle */
 	struct spdk_poller *transient_hold_poller;

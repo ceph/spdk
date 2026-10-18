@@ -3256,12 +3256,10 @@ dispatch_next_chunk(struct rpc_set_ana_states_all_call_ctx *parent_ctx)
 	if (end_idx > parent_ctx->total_subsystems) {
 		end_idx = parent_ctx->total_subsystems;
 	}
-
 	parent_ctx->active_in_chunk = end_idx - start_idx;
 	SPDK_NOTICELOG("Sending chunk of %d elements\n", end_idx - start_idx);
 	for (uint32_t i = start_idx; i < end_idx; i++) {
 		struct rpc_set_ana_states_all_subsystem_ctx *subs_ctx = &parent_ctx->system_contexts[i];
-
 		spdk_nvmf_subsystem_pause(subs_ctx->subsystem, 0, rpc_subsystem_paused_cb, subs_ctx);
 	}
 	parent_ctx->next_subs_idx = end_idx;
@@ -3293,6 +3291,7 @@ rpc_subsystem_resumed_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, in
 	}
 	if (parent_ctx->remaining_subsystems == 0) {
 		SPDK_NOTICELOG("resumed all subsystems after set_ana_states_all\n");
+	 if (parent_ctx->request) {
 		if (parent_ctx->status == 0) {
 			spdk_jsonrpc_send_bool_response(parent_ctx->request, true);
 		} else {
@@ -3317,6 +3316,7 @@ rpc_subsystem_resumed_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, in
 				spdk_jsonrpc_end_result(parent_ctx->request, w);
 			}
 		}
+	  }
 		free(parent_ctx->system_contexts);
 		free(parent_ctx);
 	}
@@ -3348,7 +3348,7 @@ rpc_subsystem_paused_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int
 	/* Subsystem is now PAUSED: safe to execute set_ana_state */
 	struct spdk_nvmf_subsystem_listener *listener;
 	uint32_t listener_count = 0;
-
+	SPDK_NOTICELOG("paused subsystem  %s DDD\n", subsystem->subnqn);
 	if (status != 0) {
 		if (parent_ctx->status == 0) {
 			parent_ctx->status = status;
@@ -3387,16 +3387,103 @@ rpc_subsystem_paused_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int
 }
 
 static void
+nvmf_subsystem_set_ana_states_all_internal(struct spdk_nvmf_tgt *tgt,
+                                           uint32_t *grpids,
+                                           enum spdk_nvme_ana_state *states,
+                                           uint32_t grp_count,
+                                           struct spdk_jsonrpc_request *request,
+                                           uint32_t chunk_subs)
+{
+	struct rpc_set_ana_states_all_call_ctx *ctx = NULL;
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_subsystem_listener *listener;
+	uint32_t total_calls = 0;
+	uint32_t total_subsystems = 0;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		if (request) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		} else {
+			SPDK_ERRLOG("Transient hold timeout: Out of memory for ANA state update context\n");
+		}
+		return;
+	}
+
+	ctx->request = request;
+	ctx->status  = 0;
+	ctx->total_remaining = 0;
+	ctx->grp_count  = grp_count;
+
+	for (size_t i = 0; i < grp_count; i++) {
+		ctx->parsed_grpids[i] = grpids[i];
+		ctx->parsed_states[i] = states[i];
+	}
+
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem != NULL;
+	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		const struct spdk_nvmf_subsystem_opts *opts = spdk_nvmf_subsystem_get_opts(subsystem);
+		if (opts->type != SPDK_NVMF_SUBTYPE_NVME) {
+			continue;
+		}
+		total_subsystems++;
+		for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
+		     listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
+			total_calls += grp_count;
+		}
+	}
+
+	if (total_calls == 0) {
+		if (request) {
+			spdk_jsonrpc_send_bool_response(request, true);
+		}
+		free(ctx);
+		return;
+	}
+
+	ctx->system_contexts = calloc(total_subsystems, sizeof(struct rpc_set_ana_states_all_subsystem_ctx));
+	if (!ctx->system_contexts) {
+		if (request) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		}
+		free(ctx);
+		return;
+	}
+
+	ctx->total_subsystems = total_subsystems;
+	if (chunk_subs == 0 || chunk_subs > total_subsystems) {
+		chunk_subs = total_subsystems;
+	}
+	ctx->chunk_subs = chunk_subs;
+	ctx->total_remaining = total_calls;
+
+	uint32_t subs_idx = 0;
+	for (subsystem = spdk_nvmf_subsystem_get_first(tgt);
+	     subsystem != NULL;
+	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
+		const struct spdk_nvmf_subsystem_opts *opts = spdk_nvmf_subsystem_get_opts(subsystem);
+		if (opts->type != SPDK_NVMF_SUBTYPE_NVME) {
+			continue;
+		}
+		struct rpc_set_ana_states_all_subsystem_ctx *subs_ctx = &ctx->system_contexts[subs_idx++];
+		subs_ctx->subsystem = subsystem;
+		subs_ctx->parent = ctx;
+		subs_ctx->status = 0;
+		ctx->remaining_subsystems++;
+	}
+
+	dispatch_next_chunk(ctx);
+}
+
+static void
 rpc_nvmf_subsystem_set_ana_states_all(struct spdk_jsonrpc_request *request,
 				      const struct spdk_json_val *params)
 {
 	struct rpc_nvmf_subsystem_set_ana_states_all_ctx req = {};
 	struct spdk_nvmf_tgt *tgt;
-	struct spdk_nvmf_subsystem *subsystem;
-	struct spdk_nvmf_subsystem_listener *listener;
-	struct rpc_set_ana_states_all_call_ctx *ctx = NULL;
-	uint32_t total_calls = 0;
-	uint32_t total_subsystems = 0;
+	uint32_t *parsed_grpids = NULL;
+	enum spdk_nvme_ana_state *parsed_states = NULL;
+
 	if (spdk_json_decode_object(params, rpc_nvmf_subsystem_set_ana_states_all_decoders,
 				    SPDK_COUNTOF(rpc_nvmf_subsystem_set_ana_states_all_decoders), &req)) {
 		SPDK_ERRLOG("Failed to decode parameters for nvmf_subsystem_set_ana_states_all\n");
@@ -3418,86 +3505,30 @@ rpc_nvmf_subsystem_set_ana_states_all(struct spdk_jsonrpc_request *request,
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Target not found");
 		goto cleanup;
 	}
-	ctx = calloc(1, sizeof(*ctx));
-	if (!ctx) {
+
+	// Dynamically allocate based on decoded count
+	parsed_grpids = calloc(req.ana_grpids.count, sizeof(uint32_t));
+	parsed_states = calloc(req.ana_grpids.count, sizeof(enum spdk_nvme_ana_state));
+	if (!parsed_grpids || !parsed_states) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
 		goto cleanup;
 	}
-	ctx->request = request;
-	ctx->status  = 0;
-	ctx->total_remaining = 0;
-	ctx->grp_count  = req.ana_grpids.count;
-	ctx->system_contexts = NULL;
+
 	for (size_t i = 0; i < req.ana_grpids.count; i++) {
-		ctx->parsed_grpids[i] = (uint32_t)strtoul(req.ana_grpids.items[i], NULL, 10);
-		if (parse_ana_state_enum_str(req.ana_states.items[i], &ctx->parsed_states[i]) != 0) {
+		parsed_grpids[i] = (uint32_t)strtoul(req.ana_grpids.items[i], NULL, 10);
+		if (parse_ana_state_enum_str(req.ana_states.items[i], &parsed_states[i]) != 0) {
 			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 							     "Invalid ANA state string: %s", req.ana_states.items[i]);
 			goto cleanup;
 		}
 	}
-	for (size_t i = 0; i < req.ana_grpids.count; i++) {
-		SPDK_NOTICELOG(" state: %d  ana_grpid %d\n", ctx->parsed_states[i], ctx->parsed_grpids[i]);
-	}
-	for (subsystem = spdk_nvmf_subsystem_get_first(tgt); subsystem != NULL;
-	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
-		const struct spdk_nvmf_subsystem_opts *opts = spdk_nvmf_subsystem_get_opts(subsystem);
-		if (opts->type  != SPDK_NVMF_SUBTYPE_NVME) {
-			continue;
-		}
-		total_subsystems ++;
-		for (listener = spdk_nvmf_subsystem_get_first_listener(subsystem); listener != NULL;
-		     listener = spdk_nvmf_subsystem_get_next_listener(subsystem, listener)) {
-			total_calls += req.ana_grpids.count;
-		}
-	}
-	if (total_calls == 0) {
-		spdk_jsonrpc_send_bool_response(request, true);
-		goto cleanup;
-	}
-	ctx->system_contexts = calloc(total_subsystems,
-				      sizeof(struct rpc_set_ana_states_all_subsystem_ctx));
-	if (!ctx->system_contexts) {
-		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
-		goto cleanup;
-	}
-	/* Total subsystems to context */
-	ctx->total_subsystems = total_subsystems;
-	if (req.chunk_subs == 0 || req.chunk_subs > total_subsystems) {
-		req.chunk_subs = total_subsystems;
-	}
-	ctx->chunk_subs = req.chunk_subs;
-	ctx->total_remaining = total_calls; /* total calls per subsystem-listener-anagrp */
-	uint32_t subs_idx = 0;
-	for (subsystem = spdk_nvmf_subsystem_get_first(tgt);
-	     subsystem != NULL;
-	     subsystem = spdk_nvmf_subsystem_get_next(subsystem)) {
-		const struct spdk_nvmf_subsystem_opts *opts = spdk_nvmf_subsystem_get_opts(subsystem);
-		if (opts->type  != SPDK_NVMF_SUBTYPE_NVME) {
-			continue;
-		}
-		struct rpc_set_ana_states_all_subsystem_ctx *subs_ctx = &ctx->system_contexts[subs_idx++];
-		subs_ctx->subsystem = subsystem;
-		subs_ctx->parent = ctx;
-		subs_ctx->status = 0;
-		ctx->remaining_subsystems ++;
-	}
-	SPDK_NOTICELOG("Number ana states changes to do totally %d, num subsystems %d chunk size %d\n",
-		       ctx->total_remaining, ctx->remaining_subsystems, ctx->chunk_subs);
-	if (ctx->remaining_subsystems == 0) {
-		spdk_jsonrpc_send_bool_response(request, true);
-		goto cleanup;
-	}
-	dispatch_next_chunk(ctx);
-	free_rpc_nvmf_subsystem_set_ana_states_all(&req);
-	return;
+
+	nvmf_subsystem_set_ana_states_all_internal(tgt, parsed_grpids, parsed_states,
+						   req.ana_grpids.count, request, req.chunk_subs);
+
 cleanup:
-	if (ctx) {
-		if (ctx->system_contexts) {
-			free(ctx->system_contexts);
-		}
-		free(ctx);
-	}
+	free(parsed_grpids);
+	free(parsed_states);
 	free_rpc_nvmf_subsystem_set_ana_states_all(&req);
 }
 
@@ -3507,13 +3538,54 @@ SPDK_RPC_REGISTER("nvmf_subsystem_set_ana_states_all", rpc_nvmf_subsystem_set_an
 int
 nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req);
 
+/* Runtime context holding the auto-generated RPC struct, counts, and timeout flag */
+struct nvmf_transient_hold_tracker {
+	struct rpc_nvmf_set_transient_hold_ctx req;
+	struct spdk_jsonrpc_request *request;
+	uint32_t num_subsystems;
+	uint32_t remaining_subsystems;
+	bool timed_out;
+};
+
+/* Context passed through spdk_for_each_channel */
+struct nvmf_subsystem_drain_ctx {
+	struct spdk_nvmf_subsystem *subsys;
+	struct nvmf_transient_hold_tracker *tracker;
+};
+
+static void
+nvmf_transient_hold_timeout_set_all_inaccessible(void)
+{
+    struct spdk_nvmf_tgt *tgt;
+    int i;
+#define GRP_COUNT 12
+    uint32_t grpids[GRP_COUNT];
+    enum spdk_nvme_ana_state states[GRP_COUNT];
+
+    // Populate group IDs (1 through 12) and set all states to INACCESSIBLE
+    for (i = 0; i < GRP_COUNT; i++) {
+        grpids[i] = i + 1;
+        states[i] = SPDK_NVME_ANA_INACCESSIBLE_STATE;
+    }
+    // Fetch the target
+    tgt = spdk_nvmf_get_tgt(NULL);
+    if (!tgt) {
+        SPDK_ERRLOG("Transient hold timeout: No active NVMe-oF target found.\n");
+        return;
+    }
+    SPDK_NOTICELOG("Transient hold expired! Forcing all ANA groups (1- %d) to INACCESSIBLE.\n", GRP_COUNT);
+    // Pass NULL for the JSON-RPC request since this is a timeout trigger, not an RPC client call
+    nvmf_subsystem_set_ana_states_all_internal(tgt, grpids, states, GRP_COUNT, NULL, 1);
+}
+
 /* Channel Callback: Executed directly on each reactor core */
 static void
 nvmf_subsystem_drain_qpairs_on_pg(struct spdk_io_channel_iter *i)
 {
 	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
 	struct spdk_nvmf_poll_group *group = spdk_io_channel_get_ctx(ch);
-	struct spdk_nvmf_subsystem *subsys = spdk_io_channel_iter_get_ctx(i);
+	struct nvmf_subsystem_drain_ctx *drain_ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_nvmf_subsystem *subsys = drain_ctx->subsys;
 	struct spdk_nvmf_qpair *qpair, *tmp;
 	struct spdk_nvmf_request *req, *req_tmp;
 
@@ -3540,24 +3612,71 @@ nvmf_subsystem_drain_qpairs_on_pg(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
+/* Chained Point: Executes on app thread when latest subsystem finishes draining */
+static void
+nvmf_transient_hold_complete(struct nvmf_transient_hold_tracker *tracker)
+{
+	SPDK_NOTICELOG("All subsystems fully drained. timed_out=%d\n", tracker->timed_out);
+
+	/*
+	 * >>> PART 2 HOOK POINT <<<
+	 * Ready to invoke the second RPC or state change here.
+	 * If tracker->timed_out is true: timeout occurred.
+	 * If tracker->timed_out is false: manual disable / happy path.
+	 */
+	if (tracker->timed_out) {
+		nvmf_transient_hold_timeout_set_all_inaccessible();
+	} else if (tracker->request) {
+		spdk_jsonrpc_send_bool_response(tracker->request, true);
+	}
+	free(tracker->req.subnqn);
+	free(tracker);
+}
+
 /* Completion Callback: Runs on RPC thread after all reactor cores finish draining */
 static void
 nvmf_subsystem_drain_done_cb(struct spdk_io_channel_iter *i, int status)
 {
-	struct spdk_nvmf_subsystem *subsys = spdk_io_channel_iter_get_ctx(i);
+	struct nvmf_subsystem_drain_ctx *drain_ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_nvmf_subsystem *subsys = drain_ctx->subsys;
+	struct nvmf_transient_hold_tracker *tracker = drain_ctx->tracker;
 
 	if (subsys) {
 		SPDK_NOTICELOG("Transient hold fully drained and disabled for subsystem %s\n", subsys->subnqn);
 	}
+
+	if (tracker) {
+		tracker->remaining_subsystems--;
+
+		/* Terminal condition: all channels across the latest subsystem finished */
+		if (tracker->remaining_subsystems == 0) {
+			nvmf_transient_hold_complete(tracker);
+		}
+	}
+
+	free(drain_ctx);
 }
 
 /* Helper to start asynchronous drain across reactor channels */
 static void
-nvmf_subsystem_drain_all_qpairs(struct spdk_nvmf_subsystem *subsys)
+nvmf_subsystem_drain_all_qpairs(struct spdk_nvmf_subsystem *subsys,
+			       struct nvmf_transient_hold_tracker *tracker)
 {
+	struct nvmf_subsystem_drain_ctx *drain_ctx = calloc(1, sizeof(*drain_ctx));
+	if (!drain_ctx) {
+		SPDK_ERRLOG("Failed to allocate drain context for %s\n", subsys->subnqn);
+		if (tracker && --tracker->remaining_subsystems == 0) {
+			nvmf_transient_hold_complete(tracker);
+		}
+		return;
+	}
+
+	drain_ctx->subsys = subsys;
+	drain_ctx->tracker = tracker;
+
 	spdk_for_each_channel(subsys->tgt,
-			nvmf_subsystem_drain_qpairs_on_pg, subsys,
-			nvmf_subsystem_drain_done_cb);
+			      nvmf_subsystem_drain_qpairs_on_pg, drain_ctx,
+			      nvmf_subsystem_drain_done_cb);
 }
 
 /* Timer Callback */
@@ -3565,37 +3684,51 @@ static int
 nvmf_subsystem_transient_hold_timeout_cb(void *arg)
 {
 	struct spdk_nvmf_subsystem *subsys = arg;
+	struct nvmf_transient_hold_tracker *tracker =
+		(struct nvmf_transient_hold_tracker *)subsys->transient_hold_tracker;
 
 	SPDK_WARNLOG("Subsystem %s transient hold timeout expired! Triggering fallback.\n",
 				subsys->subnqn);
 
-	/* Unregister timer and clear pointer safely */
-	if (subsys->transient_hold_poller != NULL) {
+	/* Clear poller pointer safely */
+	if (subsys->transient_hold_poller) {
 		spdk_poller_unregister(&subsys->transient_hold_poller);
 		subsys->transient_hold_poller = NULL;
 	}
+	subsys->transient_hold_tracker = NULL;
+	if (tracker) {
+		tracker->timed_out = true;
+	}
 	/* Start drain across channels */
 	subsys->transient_hold_enabled = false;
-	nvmf_subsystem_drain_all_qpairs(subsys);
+	nvmf_subsystem_drain_all_qpairs(subsys, tracker);
 
-	return SPDK_POLLER_BUSY;
+	return SPDK_POLLER_BUSY; // or SPDK_POLLER_IDLE / 0
 }
 
 /* Enable Transient Hold */
 static void
-nvmf_subsystem_enable_hold(struct spdk_nvmf_subsystem *subsys, uint32_t timeout_ms)
+nvmf_subsystem_enable_hold(struct spdk_nvmf_subsystem *subsys, uint32_t timeout_ms,
+			   struct nvmf_transient_hold_tracker *tracker)
 {
 	if (subsys->transient_hold_enabled) {
+		SPDK_WARNLOG("Subsystem %s transient hold is already enabled.\n", subsys->subnqn);
+			if (tracker && --tracker->remaining_subsystems == 0) {
+				nvmf_transient_hold_complete(tracker);
+			}
 		return;
 	}
 	subsys->transient_hold_enabled = true;
+	subsys->transient_hold_tracker = tracker;
+
 	if (timeout_ms) {
 		uint64_t timeout_us = (uint64_t)(timeout_ms * 1000);
 		subsys->transient_hold_poller = SPDK_POLLER_REGISTER(
 				nvmf_subsystem_transient_hold_timeout_cb, subsys,
 				timeout_us);
-	}	else {
+	} else {
 		subsys->transient_hold_poller = NULL;
+		subsys->transient_hold_tracker = NULL;
 	}
 	SPDK_NOTICELOG("Transient hold ENABLED for subsystem %s (%s)\n",
 			subsys->subnqn,
@@ -3604,80 +3737,158 @@ nvmf_subsystem_enable_hold(struct spdk_nvmf_subsystem *subsys, uint32_t timeout_
 
 /* Disable Transient Hold on a Subsystem (Happy Path) */
 static void
-nvmf_subsystem_disable_hold(struct spdk_nvmf_subsystem *subsys)
+nvmf_subsystem_disable_hold(struct spdk_nvmf_subsystem *subsys,
+			    struct nvmf_transient_hold_tracker *tracker)
 {
 	if (!subsys->transient_hold_enabled) {
+		if (tracker && --tracker->remaining_subsystems == 0) {
+			nvmf_transient_hold_complete(tracker);
+		}
 		return;
 	}
-	/*1. Unregister the subsystem poller*/
+	/* 1. Unregister the subsystem poller */
 	if (subsys->transient_hold_poller != NULL) {
 		spdk_poller_unregister(&subsys->transient_hold_poller);
 		subsys->transient_hold_poller = NULL;
 	}
+	subsys->transient_hold_tracker = NULL;
+
 	/* 2. DISABLE HOLD FIRST! Stop trapping new requests immediately! */
 	subsys->transient_hold_enabled = false;
 
-	/* Dispatch drain to reactors. nvmf_subsystem_drain_done_cb resets transient_hold_enabled */
-	nvmf_subsystem_drain_all_qpairs(subsys);
+	/* Dispatch drain to reactors */
+	nvmf_subsystem_drain_all_qpairs(subsys, tracker);
 }
 
 /* Main RPC Handler Function */
 static void
 rpc_nvmf_set_transient_hold(struct spdk_jsonrpc_request *request,
-							const struct spdk_json_val *params)
+			    const struct spdk_json_val *params)
 {
-	struct rpc_nvmf_set_transient_hold_ctx req = {};
+	struct nvmf_transient_hold_tracker *tracker;
 	struct spdk_nvmf_tgt *tgt;
 	struct spdk_nvmf_subsystem *subsystem;
+	uint32_t count = 0;
+
+	tracker = calloc(1, sizeof(*tracker));
+	if (!tracker) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		return;
+	}
 
 	if (spdk_json_decode_object(params, rpc_nvmf_set_transient_hold_decoders,
-				SPDK_COUNTOF(rpc_nvmf_set_transient_hold_decoders), &req)) {
+				SPDK_COUNTOF(rpc_nvmf_set_transient_hold_decoders), &tracker->req)) {
 		SPDK_ERRLOG("Failed to parse RPC parameters\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		free(tracker);
 		return;
 	}
 
 	tgt = spdk_nvmf_get_tgt(NULL);
 	if (!tgt) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Target instance not found");
-		free(req.subnqn);
+		free(tracker->req.subnqn);
+		free(tracker);
 		return;
 	}
-	/* Determine target scope: single subsystem or ALL subsystems */
-	bool apply_to_all = (req.subnqn == NULL || strcmp(req.subnqn, "all") == 0 || strlen(req.subnqn) == 0);
 
+	/* Determine target scope: single subsystem or ALL subsystems */
+	bool apply_to_all = (tracker->req.subnqn == NULL ||
+			     strcmp(tracker->req.subnqn, "all") == 0 ||
+			     strlen(tracker->req.subnqn) == 0);
+
+	/* Count target subsystems */
 	if (apply_to_all) {
 		/* Iterate over all subsystems in memory */
-		subsystem = spdk_nvmf_subsystem_get_first(tgt); //NVMF_SUBSYSTEM_FOREACH(tgt, subsystem)
+		subsystem = spdk_nvmf_subsystem_get_first(tgt);
 		while (subsystem != NULL) {
 			if (subsystem->opts.type == SPDK_NVMF_SUBTYPE_NVME) {
-				SPDK_NOTICELOG("Started rpc_nvmf_set_transient_hold, enable %d\n", req.enable);
-				if (req.enable) {
-					nvmf_subsystem_enable_hold(subsystem, req.timeout_ms);
+				count++;
+			}
+			subsystem = spdk_nvmf_subsystem_get_next(subsystem);
+		}
+	} else {
+		subsystem = spdk_nvmf_tgt_find_subsystem(tgt, tracker->req.subnqn);
+		if (!subsystem) {
+			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+					"Subsystem %s not found", tracker->req.subnqn);
+			free(tracker->req.subnqn);
+			free(tracker);
+			return;
+		}
+		count = 1;
+	}
+
+	tracker->num_subsystems = count;
+	tracker->remaining_subsystems = count;
+	tracker->timed_out = false;
+	tracker->request = request;
+	bool req_enable = tracker->req.enable;
+
+	/* phase of cleanup of old  tracker from all subsystems */
+	if (!tracker->req.enable) {
+		struct nvmf_transient_hold_tracker *old_tracker = NULL;
+		struct spdk_nvmf_subsystem *s;
+		/*
+		 * Single-pass cleanup:
+		 * Traverse subsystems, record the active tracker on the first match,
+		 * and detach it across all matching subsystems to prevent double-free.
+		 */
+		s = spdk_nvmf_subsystem_get_first(tgt);
+		while (s != NULL) {
+			if (s->opts.type == SPDK_NVMF_SUBTYPE_NVME && s->transient_hold_tracker != NULL) {
+				/* Filter by specific subsystem if not apply_to_all */
+				/* Capture the shared tracker pointer on first hit */
+				if (old_tracker == NULL) {
+					old_tracker = s->transient_hold_tracker;
+				}
+				/* Detach the reference from this subsystem */
+				if (s->transient_hold_tracker == old_tracker) {
+					s->transient_hold_tracker = NULL;
+				}
+			}
+			s = spdk_nvmf_subsystem_get_next(s);
+		}
+		/* Safely free the old tracker exactly once outside the loop */
+		if (old_tracker != NULL) {
+			SPDK_NOTICELOG("Freeing old transient hold tracker %p\n", old_tracker);
+			free(old_tracker->req.subnqn);
+			free(old_tracker);
+		}
+	}
+	if (apply_to_all) {
+		/* Iterate over all subsystems in memory */
+		subsystem = spdk_nvmf_subsystem_get_first(tgt);
+		while (subsystem != NULL) {
+			if (subsystem->opts.type == SPDK_NVMF_SUBTYPE_NVME) {
+				SPDK_NOTICELOG("Started rpc_nvmf_set_transient_hold, enable %d, subs-nqn %s\n",
+						tracker->req.enable, subsystem->subnqn);
+				if (tracker->req.enable) {
+					nvmf_subsystem_enable_hold(subsystem, tracker->req.timeout_ms, tracker);
 				} else {
-					nvmf_subsystem_disable_hold(subsystem);
+					nvmf_subsystem_disable_hold(subsystem, tracker);
 				}
 			}
 			subsystem = spdk_nvmf_subsystem_get_next(subsystem);
 		}
 	} else {
 		/* Target a single subsystem */
-		subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req.subnqn);
-		if (!subsystem) {
-			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-					"Subsystem %s not found", req.subnqn);
-			free(req.subnqn);
-			return;
-		}
-		SPDK_NOTICELOG("Started rpc_nvmf_set_transient_hold, enable %d\n", req.enable);
-		if (req.enable) {
-			nvmf_subsystem_enable_hold(subsystem, req.timeout_ms);
+		SPDK_NOTICELOG("Started rpc_nvmf_set_transient_hold, enable %d, subs-nqn %s\n",
+						tracker->req.enable, subsystem->subnqn);
+		if (tracker->req.enable) {
+			nvmf_subsystem_enable_hold(subsystem, tracker->req.timeout_ms, tracker);
 		} else {
-			nvmf_subsystem_disable_hold(subsystem);
+			nvmf_subsystem_disable_hold(subsystem, tracker);
 		}
 	}
-	free(req.subnqn);
-	spdk_jsonrpc_send_bool_response(request, true);
+	if (req_enable) { // send response and free tracker if no timer armed
+		spdk_jsonrpc_send_bool_response(tracker->request, true);
+		SPDK_NOTICELOG("Transient hold ENABLE completed. timeout %d\n",tracker->timed_out);
+		if (tracker->req.timeout_ms == 0) {
+			free(tracker->req.subnqn);
+			free(tracker);
+		}
+	}
 }
 
 SPDK_RPC_REGISTER("nvmf_set_transient_hold", rpc_nvmf_set_transient_hold, SPDK_RPC_RUNTIME);
