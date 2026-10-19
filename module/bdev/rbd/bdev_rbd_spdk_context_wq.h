@@ -1,0 +1,160 @@
+/*   SPDX-License-Identifier: BSD-3-Clause
+ *   Copyright (C) 2025,2026 IBM, Inc.
+ *   All rights reserved.
+ */
+
+#ifndef SPDK_BDEV_RBD_SPDK_CONTEXT_WQ_H
+#define SPDK_BDEV_RBD_SPDK_CONTEXT_WQ_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+// Forward declaration for SPDK thread
+struct spdk_thread;
+
+// Forward declaration for rbd_image_t (defined in <rbd/librbd.h>)
+// We use void* here to avoid including librbd.h in the header
+#ifndef rbd_image_t
+typedef void* rbd_image_t;
+#endif
+
+// Forward declaration for rados_ioctx_t (defined in <rados/librados.h>)
+#ifndef rados_ioctx_t
+typedef void* rados_ioctx_t;
+#endif
+
+// Opaque type for SpdkContextWQ - provides type safety in C code
+// The actual implementation is C++ and is hidden behind this opaque pointer
+struct bdev_rbd_spdk_context_wq;
+
+// C API for creating SpdkContextWQ from C code (bdev_rbd.c)
+// These declarations are available to both C and C++ code
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Create a SpdkContextWQ from rados_ioctx_t and SPDK reactor thread.
+ * The returned pointer must be freed by calling bdev_rbd_spdk_context_wq_destroy().
+ *
+ * @param io_ctx RADOS I/O context (rados_ioctx_t)
+ * @param reactor_thread SPDK reactor thread
+ * @return Pointer to SpdkContextWQ, or NULL on error
+ */
+struct bdev_rbd_spdk_context_wq* bdev_rbd_spdk_context_wq_create_from_ioctx(rados_ioctx_t io_ctx, struct spdk_thread* reactor_thread);
+
+/**
+ * Destroy a SpdkContextWQ created by bdev_rbd_spdk_context_wq_create_from_ioctx().
+ *
+ * @param context_wq Pointer to SpdkContextWQ
+ */
+void bdev_rbd_spdk_context_wq_destroy(struct bdev_rbd_spdk_context_wq* context_wq);
+
+/**
+ * Return the next reactor thread for SpdkContextWQ (round-robin).
+ * Lazy-initializes the reactor list on first call (lock-free, atomic CAS).
+ * Each call returns a different reactor so RBD images are balanced across reactors.
+ * Returns NULL if no reactor threads were discovered (error is logged).
+ */
+struct spdk_thread* bdev_rbd_find_reactor_thread(void);
+
+/**
+ * Configure SpdkContextWQ per-reactor work-ring size (power of two).
+ * Must be called before any ring is created (before first RBD open with Spdk WQ).
+ *
+ * @return 0 on success, -EINVAL if size invalid, -EBUSY if rings already exist
+ */
+int bdev_rbd_wq_set_ring_size(uint32_t ring_size);
+
+/** Configured ring size (default 65536). */
+uint32_t bdev_rbd_wq_get_ring_size(void);
+
+/** Poller dequeue batch size (constant). */
+uint32_t bdev_rbd_wq_get_poll_batch(void);
+
+/** True once at least one ReactorDispatch ring has been created. */
+bool bdev_rbd_wq_rings_created(void);
+
+struct bdev_rbd_wq_reactor_stats {
+	uint64_t thread_id;
+	char thread_name[64];
+	uint32_t ring_size;
+	uint64_t fallback;
+	uint64_t deq_items;
+	uint64_t deq_batches;
+	uint64_t deq_empty;
+	uint64_t depth;
+	uint64_t depth_hwm;
+};
+
+typedef void (*bdev_rbd_wq_stats_fn)(void *cb_arg,
+				     const struct bdev_rbd_wq_reactor_stats *stats);
+
+/**
+ * Invoke @p fn once per reactor dispatch ring (under an internal lock).
+ * Safe for infrequent monitoring (e.g. 1 Hz RPC).
+ */
+void bdev_rbd_wq_get_stats(bdev_rbd_wq_stats_fn fn, void *cb_arg);
+
+/**
+ * Unregister per-reactor dispatch pollers, drain leftover work, and free rings.
+ * Called from bdev_rbd module fini so poll-group threads can exit cleanly.
+ */
+void bdev_rbd_wq_fini(void);
+
+#ifdef __cplusplus
+}
+
+// C++ class definition - only available when compiling C++ code
+#include <rbd/asio/ContextWQ.hpp>
+
+namespace librbd {
+namespace asio {
+
+/**
+ * ContextWQ implementation that schedules work on SPDK reactor threads
+ */
+class SpdkContextWQ : public ContextWQ {
+public:
+  explicit SpdkContextWQ(void* cct, struct spdk_thread* reactor_thread);
+  ~SpdkContextWQ();
+
+  void drain() override;
+
+  void post(Work fn) override;
+  void dispatch(Work fn) override;
+  void post_serial(Work fn) override;
+
+  // Ordered per channel, not globally: runs inline on any reactor, since SPDK
+  // executes each spdk_thread single-threaded.
+  void dispatch_serial(Work fn) override;
+
+  // Off-reactor: deliver to @p channel (submit reactor) when set, else the
+  // image WQ reactor. On-reactor: still runs inline.
+  void dispatch_serial_channel(Channel channel, Work fn) override;
+
+  // A channel is the dispatch context of one spdk_thread. Completions bound
+  // to a channel are delivered back to the thread that submitted the op,
+  // which lets bdev_rbd_io_complete() take its inline branch.
+  Channel current_channel() const override;
+  void post_channel(Channel channel, Work fn) override;
+
+private:
+  struct spdk_thread* m_reactor_thread;
+
+  // Per-reactor dispatch context (ReactorDispatch*), created lazily and shared
+  // by all SpdkContextWQ instances bound to the same reactor. Opaque here;
+  // defined in the .cpp. Work is delivered to the reactor through a lock-free
+  // MP/SC ring drained by an SPDK poller, which avoids spdk_thread_send_msg()
+  // and therefore the shared g_spdk_msg_mempool and its rte_pause lock spinning.
+  void* m_dispatch;
+
+  void send_fn(Work fn);
+};
+
+} // namespace asio
+} // namespace librbd
+
+#endif // __cplusplus
+
+#endif /* SPDK_BDEV_RBD_SPDK_CONTEXT_WQ_H */

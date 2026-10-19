@@ -508,6 +508,45 @@ def add_parser(subparsers):
     p.add_argument('new_size', help='new bdev size for resize operation. The unit is MiB', type=int)
     p.set_defaults(func=bdev_rbd_resize)
 
+    def bdev_rbd_get_with_spdk_wq(args):
+        print_json(args.client.bdev_rbd_get_with_spdk_wq())
+
+    p = subparsers.add_parser('bdev_rbd_get_with_spdk_wq',
+                              help='Get the state of the SPDK reactor work queue for RBD')
+    p.set_defaults(func=bdev_rbd_get_with_spdk_wq)
+
+    def bdev_rbd_set_with_spdk_wq(args):
+        args.client.bdev_rbd_set_with_spdk_wq(enable=args.enable)
+
+    p = subparsers.add_parser('bdev_rbd_set_with_spdk_wq',
+                              help='Enable or disable the SPDK reactor work queue for RBD')
+    p.add_argument('--enable', dest='enable', action=argparse.BooleanOptionalAction,
+                   required=True, help='Enable or disable the SPDK reactor work queue')
+    p.set_defaults(func=bdev_rbd_set_with_spdk_wq)
+
+    def bdev_rbd_get_wq_options(args):
+        print_json(args.client.bdev_rbd_get_wq_options())
+
+    p = subparsers.add_parser('bdev_rbd_get_wq_options',
+                              help='Get SpdkContextWQ options')
+    p.set_defaults(func=bdev_rbd_get_wq_options)
+
+    def bdev_rbd_set_wq_options(args):
+        print_json(args.client.bdev_rbd_set_wq_options(ring_size=args.ring_size))
+
+    p = subparsers.add_parser('bdev_rbd_set_wq_options',
+                              help='Set SpdkContextWQ options')
+    p.add_argument('--ring-size', dest='ring_size', type=int, required=True,
+                   help='SpdkContextWQ per-reactor work-ring size (power of two, before first ring create)')
+    p.set_defaults(func=bdev_rbd_set_wq_options)
+
+    def bdev_rbd_get_wq_stats(args):
+        print_json(args.client.bdev_rbd_get_wq_stats())
+
+    p = subparsers.add_parser('bdev_rbd_get_wq_stats',
+                              help='Get SpdkContextWQ per-reactor ring statistics')
+    p.set_defaults(func=bdev_rbd_get_wq_stats)
+
     def bdev_delay_create(args):
         print_json(args.client.bdev_delay_create(
                                               base_bdev_name=args.base_bdev_name,

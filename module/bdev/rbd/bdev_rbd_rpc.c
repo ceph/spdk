@@ -4,6 +4,7 @@
  */
 
 #include "bdev_rbd.h"
+#include "bdev_rbd_spdk_context_wq.h"
 #include "spdk/util.h"
 #include "spdk/uuid.h"
 #include "spdk/string.h"
@@ -348,3 +349,155 @@ SPDK_RPC_REGISTER("bdev_rbd_wait_for_latest_osdmap", rpc_bdev_rbd_wait_for_lates
 
 SPDK_RPC_REGISTER("bdev_rbd_get_with_crc32c", rpc_bdev_rbd_get_with_crc32c, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER("bdev_rbd_set_with_crc32c", rpc_bdev_rbd_set_with_crc32c, SPDK_RPC_STARTUP)
+
+/**
+ * RPC function to get the current rbd_with_spdk_wq setting
+ */
+static void
+rpc_bdev_rbd_get_with_spdk_wq(struct spdk_jsonrpc_request *request,
+			      const struct spdk_json_val *params)
+{
+	struct spdk_json_write_ctx *w;
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, bdev_rbd_get_with_spdk_wq());
+	spdk_jsonrpc_end_result(request, w);
+}
+
+/**
+ * RPC function to set the rbd_with_spdk_wq parameter
+ */
+static void
+rpc_bdev_rbd_set_with_spdk_wq(struct spdk_jsonrpc_request *request,
+			     const struct spdk_json_val *params)
+{
+	struct rpc_bdev_rbd_set_with_spdk_wq_ctx req = {};
+	struct spdk_json_write_ctx *w;
+
+	if (spdk_json_decode_object(params, rpc_bdev_rbd_set_with_spdk_wq_decoders,
+				    SPDK_COUNTOF(rpc_bdev_rbd_set_with_spdk_wq_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						"Missing or invalid enable parameter");
+		return;
+	}
+
+	bdev_rbd_set_with_spdk_wq(req.enable);
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_bool(w, bdev_rbd_get_with_spdk_wq());
+	spdk_jsonrpc_end_result(request, w);
+}
+
+SPDK_RPC_REGISTER("bdev_rbd_get_with_spdk_wq", rpc_bdev_rbd_get_with_spdk_wq, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_rbd_set_with_spdk_wq", rpc_bdev_rbd_set_with_spdk_wq, SPDK_RPC_STARTUP)
+
+/**
+ * Get SpdkContextWQ ring options (size, poll batch, whether rings exist).
+ */
+static void
+rpc_bdev_rbd_get_wq_options(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct spdk_json_write_ctx *w;
+
+	if (params != NULL) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "bdev_rbd_get_wq_options requires no parameters");
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint32(w, "ring_size", bdev_rbd_wq_get_ring_size());
+	spdk_json_write_named_uint32(w, "poll_batch", bdev_rbd_wq_get_poll_batch());
+	spdk_json_write_named_bool(w, "rings_created", bdev_rbd_wq_rings_created());
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+}
+
+/**
+ * Set SpdkContextWQ ring_size before any ring is created.
+ * ring_size must be a power of two in [1024, 1048576].
+ */
+static void
+rpc_bdev_rbd_set_wq_options(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct rpc_bdev_rbd_set_wq_options_ctx req = {};
+	struct spdk_json_write_ctx *w;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_bdev_rbd_set_wq_options_decoders,
+				    SPDK_COUNTOF(rpc_bdev_rbd_set_wq_options_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Missing or invalid ring_size parameter");
+		return;
+	}
+
+	rc = bdev_rbd_wq_set_ring_size(req.ring_size);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint32(w, "ring_size", bdev_rbd_wq_get_ring_size());
+	spdk_json_write_named_uint32(w, "poll_batch", bdev_rbd_wq_get_poll_batch());
+	spdk_json_write_named_bool(w, "rings_created", bdev_rbd_wq_rings_created());
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+}
+
+struct rpc_wq_stats_ctx {
+	struct spdk_json_write_ctx *w;
+};
+
+static void
+rpc_wq_stats_cb(void *cb_arg, const struct bdev_rbd_wq_reactor_stats *s)
+{
+	struct rpc_wq_stats_ctx *ctx = cb_arg;
+
+	spdk_json_write_object_begin(ctx->w);
+	spdk_json_write_named_uint64(ctx->w, "thread_id", s->thread_id);
+	spdk_json_write_named_string(ctx->w, "thread_name",
+				     s->thread_name[0] ? s->thread_name : "");
+	spdk_json_write_named_uint32(ctx->w, "ring_size", s->ring_size);
+	spdk_json_write_named_uint64(ctx->w, "fallback", s->fallback);
+	spdk_json_write_named_uint64(ctx->w, "deq_items", s->deq_items);
+	spdk_json_write_named_uint64(ctx->w, "deq_batches", s->deq_batches);
+	spdk_json_write_named_uint64(ctx->w, "deq_empty", s->deq_empty);
+	spdk_json_write_named_uint64(ctx->w, "depth", s->depth);
+	spdk_json_write_named_uint64(ctx->w, "depth_hwm", s->depth_hwm);
+	spdk_json_write_object_end(ctx->w);
+}
+
+/**
+ * Per-reactor SpdkContextWQ ring stats (fallback, dequeue, depth).
+ */
+static void
+rpc_bdev_rbd_get_wq_stats(struct spdk_jsonrpc_request *request,
+			  const struct spdk_json_val *params)
+{
+	struct spdk_json_write_ctx *w;
+	struct rpc_wq_stats_ctx ctx = {};
+
+	if (params != NULL) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "bdev_rbd_get_wq_stats requires no parameters");
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_array_begin(w);
+	ctx.w = w;
+	bdev_rbd_wq_get_stats(rpc_wq_stats_cb, &ctx);
+	spdk_json_write_array_end(w);
+	spdk_jsonrpc_end_result(request, w);
+}
+
+SPDK_RPC_REGISTER("bdev_rbd_get_wq_options", rpc_bdev_rbd_get_wq_options, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_rbd_set_wq_options", rpc_bdev_rbd_set_wq_options, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_rbd_get_wq_stats", rpc_bdev_rbd_get_wq_stats, SPDK_RPC_RUNTIME)
