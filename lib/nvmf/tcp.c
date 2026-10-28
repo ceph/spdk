@@ -1013,7 +1013,7 @@ tcp_sock_get_key(uint8_t *out, int out_len, const char **cipher, const char *psk
 	int rc;
 
 	TAILQ_FOREACH(entry, &ttransport->psks, link) {
-		if (strcmp(pskid, entry->pskid) != 0) {
+		if (strncmp(pskid, entry->pskid, sizeof(entry->pskid)) != 0) {
 			continue;
 		}
 
@@ -1029,6 +1029,7 @@ tcp_sock_get_key(uint8_t *out, int out_len, const char **cipher, const char *psk
 					     entry->tls_cipher_suite);
 		if (rc < 0) {
 			SPDK_ERRLOG("Could not generate TLS PSK\n");
+			return rc;
 		}
 
 		switch (entry->tls_cipher_suite) {
@@ -1094,8 +1095,8 @@ nvmf_tcp_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_tr
 	opts.ack_timeout = transport->opts.ack_timeout;
 	if (listen_opts->secure_channel) {
 		if (listen_opts->sock_impl &&
-		    strncmp("ssl", listen_opts->sock_impl, strlen(listen_opts->sock_impl))) {
-			SPDK_ERRLOG("Enabling secure_channel while specifying a sock_impl different from 'ssl' is unsupported");
+		    strcmp(listen_opts->sock_impl, "ssl") != 0) {
+			SPDK_ERRLOG("Enabling secure_channel while specifying a sock_impl different from 'ssl' is unsupported\n");
 			free(port);
 			return -EINVAL;
 		}
@@ -1106,7 +1107,7 @@ nvmf_tcp_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_tr
 		sock_impl_name = listen_opts->sock_impl;
 		spdk_sock_impl_get_opts(sock_impl_name, &impl_opts, &impl_opts_size);
 
-		if (!strncmp("ssl", sock_impl_name, strlen(sock_impl_name))) {
+		if (strcmp(sock_impl_name, "ssl") == 0) {
 			if (!g_tls_log) {
 				SPDK_NOTICELOG("TLS support is considered experimental\n");
 				g_tls_log = true;

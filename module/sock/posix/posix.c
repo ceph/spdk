@@ -68,6 +68,7 @@ struct spdk_posix_sock {
 
 	SSL_CTX			*ssl_ctx;
 	SSL			*ssl;
+	bool			ssl_read_wants_write;
 
 	TAILQ_ENTRY(spdk_posix_sock)	link;
 
@@ -544,7 +545,8 @@ posix_sock_psk_find_session_server_cb(SSL *ssl, const unsigned char *identity,
 		}
 
 		SPDK_DEBUGLOG(sock_posix, "Length of Client's PSK ID %lu\n", strlen(impl_opts->psk_identity));
-		if (strcmp(impl_opts->psk_identity, identity) != 0) {
+		if (strlen(impl_opts->psk_identity) != identity_len ||
+		    memcmp(impl_opts->psk_identity, identity, identity_len) != 0) {
 			SPDK_ERRLOG("Unknown Client's PSK ID\n");
 			return 0;
 		}
@@ -708,6 +710,12 @@ posix_sock_create_ssl_context(const SSL_METHOD *method, struct spdk_sock_impl_op
 		SPDK_ERRLOG("SSL_CTX_new() failed, msg = %s\n", ERR_error_string(ERR_peek_last_error(), NULL));
 		return NULL;
 	}
+        /* N#2 The Strict Retry Rule*/
+
+	SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE |
+			      SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
+			      SSL_MODE_AUTO_RETRY);
+
 	SPDK_DEBUGLOG(sock_posix, "SSL context created\n");
 
 	switch (impl_opts->tls_version) {
@@ -832,7 +840,7 @@ posix_sock_configure_ssl(struct spdk_posix_sock *sock, bool client)
 	SSL_set_app_data(sock->ssl, &sock->base.impl_opts);
 	return 0;
 }
-
+/* N#1 The WANT_READ and WANT_WRITE Paradox */
 static int
 posix_ssl_get_error(SSL *ssl, int rc)
 {
@@ -847,31 +855,60 @@ posix_ssl_get_error(SSL *ssl, int rc)
 	case SSL_ERROR_WANT_CLIENT_HELLO_CB:
 		return -EAGAIN;
 	case SSL_ERROR_ZERO_RETURN:
+		return 0;
 	case SSL_ERROR_SYSCALL:
+		if (errno != 0) {
+			return -errno;
+		}
+		return -ECONNRESET;
 	case SSL_ERROR_SSL:
 	default:
-		return -ENOTCONN;
+		return -EIO;
 	}
 }
 
+/* N#3 The Internal Buffering Trap */
 static ssize_t
-posix_ssl_readv(SSL *ssl, const struct iovec *iov, int iovcnt)
+posix_ssl_readv(struct spdk_posix_sock *sock, const struct iovec *iov, int iovcnt)
 {
-	int i, rc = 0;
+	SSL *ssl = sock->ssl;
+	int i;
+	int rc = 0;
 	ssize_t total = 0;
+	int ssl_err;
 
 	for (i = 0; i < iovcnt; i++) {
-		rc = SSL_read(ssl, iov[i].iov_base, iov[i].iov_len);
+		char *base = (char *)iov[i].iov_base;
+		size_t len = iov[i].iov_len;
 
-		if (rc > 0) {
-			total += rc;
+		while (len > 0) {
+			rc = SSL_read(ssl, base, len);
+			if (rc > 0) {
+				total += rc;
+				base += rc;
+				len -= rc;
+				sock->ssl_read_wants_write = false;
+				if (SSL_pending(ssl) == 0) {
+					break;
+				}
+			} else {
+				break;
+			}
 		}
-		if (rc != (int)iov[i].iov_len) {
+		if (rc <= 0) {
 			break;
 		}
 	}
+
 	if (total > 0) {
 		return total;
+	}
+	/* N#1 WANT_READ WANT_WRITE paradox */
+	ssl_err = SSL_get_error(ssl, rc);
+	if (ssl_err == SSL_ERROR_WANT_WRITE) {
+		sock->ssl_read_wants_write = true;
+	} else if (ssl_err == SSL_ERROR_WANT_READ) {
+		sock->ssl_read_wants_write = false;
 	}
 
 	return posix_ssl_get_error(ssl, rc);
@@ -1194,6 +1231,7 @@ posix_sock_accept(struct spdk_sock *_sock)
 	return _posix_sock_accept(_sock, false);
 }
 
+ /* N#1  The WANT_READ and WANT_WRITE Paradox - Close_notify before close */
 static int
 posix_sock_close(struct spdk_sock *_sock)
 {
@@ -1205,13 +1243,33 @@ posix_sock_close(struct spdk_sock *_sock)
 	sock_posix_connect_ctx_cleanup(&sock->connect_ctx, -ECONNRESET);
 
 	if (sock->ssl != NULL) {
-		SSL_shutdown(sock->ssl);
+		if (!SSL_in_init(sock->ssl)) {
+			int retries = 0;
+			int rc;
+
+			while (retries++ < 5) {
+				rc = SSL_shutdown(sock->ssl);
+				if (rc >= 0) {
+					break;
+				}
+				int err = SSL_get_error(sock->ssl, rc);
+				if (err != SSL_ERROR_WANT_WRITE && err != SSL_ERROR_WANT_READ) {
+					break;
+				}
+				struct pollfd pfd = { .fd = sock->fd, .events = POLLOUT };
+				if (poll(&pfd, 1, 1) <= 0) {
+					break;
+				}
+			}
+		}
+		ERR_clear_error();
 	}
 
 	/* If the socket fails to close, the best choice is to
 	 * leak the fd but continue to free the rest of the sock
 	 * memory. */
 	if (sock->fd != -1) {
+		shutdown(sock->fd, SHUT_WR);
 		close(sock->fd);
 	}
 
@@ -1354,7 +1412,7 @@ posix_readv(struct spdk_posix_sock *sock, struct iovec *iov, int iovcnt)
 	int rc;
 
 	if (sock->ssl) {
-		return posix_ssl_readv(sock->ssl, iov, iovcnt);
+		return posix_ssl_readv(sock, iov, iovcnt);
 	}
 
 	rc = readv(sock->fd, iov, iovcnt);
@@ -1580,8 +1638,11 @@ posix_sock_read(struct spdk_posix_sock *sock)
 
 	sock->pipe_has_data = true;
 	if (bytes_recvd < bytes_avail) {
-		/* We drained the kernel socket entirely. */
-		sock->socket_has_data = false;
+        /* N#3 The Internal Buffering Trap */
+		if (sock->ssl == NULL || (SSL_pending(sock->ssl) == 0 && !SSL_has_pending(sock->ssl))) {
+			/* We drained the kernel socket and SSL buffers entirely. */
+			sock->socket_has_data = false;
+		}
 	}
 
 	return bytes_recvd;
@@ -2093,6 +2154,31 @@ posix_sock_group_impl_poll(struct spdk_sock_group_impl *_group, int max_events,
 		}
 	}
 #endif
+	/* Check if any SSL sockets have data pending in userspace buffers or need writability for SSL_read */
+	TAILQ_FOREACH(sock, &_group->socks, link) {
+		psock = __posix_sock(sock);
+		if (!psock->ssl) {
+			continue;
+		}
+                /* N#3: The Internal Buffering Trap*/
+		if (SSL_pending(psock->ssl) > 0 || SSL_has_pending(psock->ssl)) {
+			if (!psock->socket_has_data && !psock->pipe_has_data) {
+				TAILQ_INSERT_TAIL(&group->socks_with_data, psock, link);
+			}
+			psock->socket_has_data = true;
+			continue;
+		}
+                /*  N#1: The WANT_READ and WANT_WRITE Paradox*/
+		if (psock->ssl_read_wants_write) {
+			struct pollfd pfd = { .fd = psock->fd, .events = POLLOUT };
+			if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLOUT)) {
+				if (!psock->socket_has_data && !psock->pipe_has_data) {
+					TAILQ_INSERT_TAIL(&group->socks_with_data, psock, link);
+				}
+				psock->socket_has_data = true;
+			}
+		}
+	}
 
 	/* This must be a TAILQ_FOREACH_SAFE because while flushing,
 	 * a completion callback could remove the sock from the
