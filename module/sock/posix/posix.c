@@ -833,12 +833,21 @@ posix_sock_configure_ssl(struct spdk_posix_sock *sock, bool client)
 	return 0;
 }
 
+/* SSL_get_error() reports SSL_ERROR_SSL or SSL_ERROR_SYSCALL whenever the calling
+ * thread's OpenSSL error queue is not empty, regardless of the call being examined.
+ * A reactor thread serves many TLS connections, so an error left by one of them (for
+ * example a peer that closes during the handshake) would turn an ordinary
+ * WANT_READ/WANT_WRITE on another connection into a fatal error. SSL_get_error(3)
+ * requires the queue to be empty before the SSL I/O call, so SSL_readv() and
+ * SSL_writev() clear it.
+ */
 static ssize_t
 SSL_readv(SSL *ssl, const struct iovec *iov, int iovcnt)
 {
 	int i, rc = 0;
 	ssize_t total = 0;
 
+	ERR_clear_error();
 	for (i = 0; i < iovcnt; i++) {
 		rc = SSL_read(ssl, iov[i].iov_base, iov[i].iov_len);
 
@@ -883,6 +892,7 @@ SSL_writev(SSL *ssl, struct iovec *iov, int iovcnt)
 	int i, rc = 0;
 	ssize_t total = 0;
 
+	ERR_clear_error();
 	for (i = 0; i < iovcnt; i++) {
 		rc = SSL_write(ssl, iov[i].iov_base, iov[i].iov_len);
 
@@ -1257,6 +1267,9 @@ posix_sock_close(struct spdk_sock *_sock)
 
 	if (sock->ssl != NULL) {
 		SSL_shutdown(sock->ssl);
+		/* Shutting down a connection that never finished its handshake records an
+		 * error; don't leave it on this thread's queue for another connection. */
+		ERR_clear_error();
 	}
 
 	/* If the socket fails to close, the best choice is to
