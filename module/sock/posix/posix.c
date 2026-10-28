@@ -779,6 +779,9 @@ ssl_sock_setup_connect(SSL_CTX *ctx, int fd)
 	}
 	SSL_set_fd(ssl, fd);
 	SSL_set_connect_state(ssl);
+	/* SPDK retries a short write from a rebuilt iovec, so let SSL_write() report
+	 * progress per record and accept the retry from a different address. */
+	SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	SSL_set_psk_use_session_callback(ssl, posix_sock_psk_use_session_client_cb);
 	SPDK_DEBUGLOG(sock_posix, "SSL object creation finished: %p\n", ssl);
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
@@ -800,6 +803,9 @@ ssl_sock_setup_accept(SSL_CTX *ctx, int fd)
 	}
 	SSL_set_fd(ssl, fd);
 	SSL_set_accept_state(ssl);
+	/* SPDK retries a short write from a rebuilt iovec, so let SSL_write() report
+	 * progress per record and accept the retry from a different address. */
+	SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	SSL_set_psk_find_session_callback(ssl, posix_sock_psk_find_session_server_cb);
 	SPDK_DEBUGLOG(sock_posix, "SSL object creation finished: %p\n", ssl);
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
@@ -833,21 +839,57 @@ posix_sock_configure_ssl(struct spdk_posix_sock *sock, bool client)
 	return 0;
 }
 
-/* SSL_get_error() reports SSL_ERROR_SSL or SSL_ERROR_SYSCALL whenever the calling
- * thread's OpenSSL error queue is not empty, regardless of the call being examined.
- * A reactor thread serves many TLS connections, so an error left by one of them (for
- * example a peer that closes during the handshake) would turn an ordinary
- * WANT_READ/WANT_WRITE on another connection into a fatal error. SSL_get_error(3)
- * requires the queue to be empty before the SSL I/O call, so SSL_readv() and
- * SSL_writev() clear it.
- */
+/* OpenSSL keeps one error queue per OS thread, and SSL_get_error() reports
+ * SSL_ERROR_SSL/SYSCALL whenever that queue is non-empty, so an error left behind by
+ * another connection on the same reactor turns WANT_READ/WANT_WRITE into a fatal error.
+ * SSL_get_error(3) requires the queue to be empty before each SSL I/O call. Log a
+ * leftover error (rate limited per thread) and clear it. */
+static __thread unsigned long g_ssl_last_stale;
+static __thread uint64_t g_ssl_stale_cnt;
+
+static void
+ssl_check_stale_err(SSL *ssl, const char *op)
+{
+	unsigned long e = ERR_peek_error();
+	char buf[256];
+
+	if (spdk_likely(e == 0)) {
+		return;
+	}
+	g_ssl_stale_cnt++;
+	if (e != g_ssl_last_stale || (g_ssl_stale_cnt % 100000) == 0) {
+		ERR_error_string_n(e, buf, sizeof(buf));
+		SPDK_NOTICELOG("stale OpenSSL error before %s fd %d (seen %" PRIu64 "x on this thread): %s\n",
+			       op, SSL_get_fd(ssl), g_ssl_stale_cnt, buf);
+		g_ssl_last_stale = e;
+	}
+	ERR_clear_error();
+}
+
+static void
+ssl_log_fatal(SSL *ssl, const char *op, int rc, int ssl_err, int sys_errno)
+{
+	unsigned long first = ERR_peek_error(), last = ERR_peek_last_error();
+	char fbuf[256] = "none", lbuf[256] = "none";
+
+	if (first) {
+		ERR_error_string_n(first, fbuf, sizeof(fbuf));
+	}
+	if (last) {
+		ERR_error_string_n(last, lbuf, sizeof(lbuf));
+	}
+	SPDK_ERRLOG("%s failed fd %d rc %d ssl_err %d errno %d handshake_done %d state '%s' "
+		    "err_first '%s' err_last '%s'\n", op, SSL_get_fd(ssl), rc, ssl_err, sys_errno,
+		    SSL_is_init_finished(ssl), SSL_state_string_long(ssl), fbuf, lbuf);
+}
+
 static ssize_t
 SSL_readv(SSL *ssl, const struct iovec *iov, int iovcnt)
 {
-	int i, rc = 0;
+	int i, rc = 0, ssl_err, sys_errno;
 	ssize_t total = 0;
 
-	ERR_clear_error();
+	ssl_check_stale_err(ssl, "SSL_read");
 	for (i = 0; i < iovcnt; i++) {
 		rc = SSL_read(ssl, iov[i].iov_base, iov[i].iov_len);
 
@@ -862,7 +904,12 @@ SSL_readv(SSL *ssl, const struct iovec *iov, int iovcnt)
 		errno = 0;
 		return total;
 	}
-	switch (SSL_get_error(ssl, rc)) {
+	sys_errno = errno;
+	ssl_err = SSL_get_error(ssl, rc);
+	if (ssl_err != SSL_ERROR_WANT_READ && ssl_err != SSL_ERROR_WANT_WRITE) {
+		ssl_log_fatal(ssl, "SSL_read", rc, ssl_err, sys_errno);
+	}
+	switch (ssl_err) {
 	case SSL_ERROR_ZERO_RETURN:
 		errno = ENOTCONN;
 		return 0;
@@ -889,10 +936,10 @@ SSL_readv(SSL *ssl, const struct iovec *iov, int iovcnt)
 static ssize_t
 SSL_writev(SSL *ssl, struct iovec *iov, int iovcnt)
 {
-	int i, rc = 0;
+	int i, rc = 0, ssl_err, sys_errno;
 	ssize_t total = 0;
 
-	ERR_clear_error();
+	ssl_check_stale_err(ssl, "SSL_write");
 	for (i = 0; i < iovcnt; i++) {
 		rc = SSL_write(ssl, iov[i].iov_base, iov[i].iov_len);
 
@@ -907,7 +954,12 @@ SSL_writev(SSL *ssl, struct iovec *iov, int iovcnt)
 		errno = 0;
 		return total;
 	}
-	switch (SSL_get_error(ssl, rc)) {
+	sys_errno = errno;
+	ssl_err = SSL_get_error(ssl, rc);
+	if (ssl_err != SSL_ERROR_WANT_READ && ssl_err != SSL_ERROR_WANT_WRITE) {
+		ssl_log_fatal(ssl, "SSL_write", rc, ssl_err, sys_errno);
+	}
+	switch (ssl_err) {
 	case SSL_ERROR_ZERO_RETURN:
 		errno = ENOTCONN;
 		return 0;
@@ -1769,6 +1821,8 @@ posix_sock_writev_async(struct spdk_sock *sock, struct spdk_sock_request *req)
 	if (sock->queued_iovcnt >= IOV_BATCH_SIZE) {
 		rc = _sock_flush(sock);
 		if (rc < 0 && errno != EAGAIN) {
+			SPDK_ERRLOG("sock flush failed fd %d errno %d (%s), aborting queued requests\n",
+				    (__posix_sock(sock))->fd, errno, spdk_strerror(errno));
 			spdk_sock_abort_requests(sock);
 		}
 	}
@@ -2186,6 +2240,8 @@ posix_sock_group_impl_poll(struct spdk_sock_group_impl *_group, int max_events,
 	TAILQ_FOREACH_SAFE(sock, &_group->socks, link, tmp) {
 		rc = _sock_flush(sock);
 		if (rc < 0 && errno != EAGAIN) {
+			SPDK_ERRLOG("sock flush failed fd %d errno %d (%s), aborting queued requests\n",
+				    (__posix_sock(sock))->fd, errno, spdk_strerror(errno));
 			spdk_sock_abort_requests(sock);
 		}
 	}
