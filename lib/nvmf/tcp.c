@@ -1252,6 +1252,8 @@ _mgmt_pdu_write_done(void *_tqpair, int err)
 	struct nvme_tcp_pdu *pdu = tqpair->mgmt_pdu;
 
 	if (spdk_unlikely(err != 0)) {
+		SPDK_ERRLOG("tqpair %p: mgmt pdu write failed, err %d, disconnecting\n",
+			    tqpair, err);
 		nvmf_tcp_qpair_write_failed(tqpair);
 		return;
 	}
@@ -1277,6 +1279,9 @@ _req_pdu_write_done(void *req, int err)
 	}
 
 	if (spdk_unlikely(err != 0)) {
+		SPDK_ERRLOG("tqpair %p: req pdu write failed, req %p state %d cid %u err %d, "
+			    "disconnecting\n",
+			    tqpair, tcp_req, tcp_req->state, tcp_req->req.cmd->nvme_cmd.cid, err);
 		nvmf_tcp_qpair_write_failed(tqpair);
 		return;
 	}

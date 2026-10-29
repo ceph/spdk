@@ -929,6 +929,51 @@ posix_ssl_set_read_wants_write(struct spdk_posix_sock *sock, bool wants)
 #endif
 }
 
+/* OpenSSL keeps one error queue per OS thread, and SSL_get_error() reports
+ * SSL_ERROR_SSL whenever that queue is non-empty, so an error left by another
+ * connection on this reactor turns WANT_READ/WANT_WRITE into a fatal error.
+ * Log a leftover error (rate limited per thread) and clear it. */
+static __thread unsigned long g_ssl_last_stale;
+static __thread uint64_t g_ssl_stale_cnt;
+
+static void
+ssl_check_stale_err(SSL *ssl, const char *op)
+{
+	unsigned long e = ERR_peek_error();
+	char buf[256];
+
+	if (spdk_likely(e == 0)) {
+		return;
+	}
+	g_ssl_stale_cnt++;
+	if (e != g_ssl_last_stale || (g_ssl_stale_cnt % 100000) == 0) {
+		ERR_error_string_n(e, buf, sizeof(buf));
+		SPDK_NOTICELOG("stale OpenSSL error before %s fd %d (seen %" PRIu64
+			       "x on this thread): %s\n",
+			       op, SSL_get_fd(ssl), g_ssl_stale_cnt, buf);
+		g_ssl_last_stale = e;
+	}
+	ERR_clear_error();
+}
+
+static void
+ssl_log_fatal(SSL *ssl, const char *op, int rc, int ssl_err, int sys_errno)
+{
+	unsigned long first = ERR_peek_error(), last = ERR_peek_last_error();
+	char fbuf[256] = "none", lbuf[256] = "none";
+
+	if (first) {
+		ERR_error_string_n(first, fbuf, sizeof(fbuf));
+	}
+	if (last) {
+		ERR_error_string_n(last, lbuf, sizeof(lbuf));
+	}
+	SPDK_ERRLOG("%s failed fd %d rc %d ssl_err %d errno %d handshake_done %d state '%s' "
+		    "err_first '%s' err_last '%s'\n",
+		    op, SSL_get_fd(ssl), rc, ssl_err, sys_errno,
+		    SSL_is_init_finished(ssl), SSL_state_string_long(ssl), fbuf, lbuf);
+}
+
 /* N#3 The Internal Buffering Trap */
 static ssize_t
 posix_ssl_readv(struct spdk_posix_sock *sock, const struct iovec *iov, int iovcnt)
@@ -937,13 +982,14 @@ posix_ssl_readv(struct spdk_posix_sock *sock, const struct iovec *iov, int iovcn
 	int i;
 	int rc = 0;
 	ssize_t total = 0;
-	int ssl_err;
+	int ssl_err = SSL_ERROR_NONE;
+	int sys_errno;
 
 	/* Category 1: SSL_get_error() reports SSL_ERROR_SSL when this thread's
 	 * queue is not empty, no matter what the call did. One reactor serves
 	 * many connections, so a handshake failure left on the queue turns
 	 * WANT_WRITE on the next connection into a fatal error. */
-	ERR_clear_error();
+	ssl_check_stale_err(ssl, "SSL_read");
 	for (i = 0; i < iovcnt; i++) {
 		char *base = (char *)iov[i].iov_base;
 		size_t len = iov[i].iov_len;
@@ -967,6 +1013,7 @@ posix_ssl_readv(struct spdk_posix_sock *sock, const struct iovec *iov, int iovcn
 		}
 	}
 
+	sys_errno = errno;
 	if (rc <= 0) {
 		/* Category 1: a later vector can need a write after earlier
 		 * bytes already succeeded. Returning those bytes without
@@ -982,6 +1029,10 @@ posix_ssl_readv(struct spdk_posix_sock *sock, const struct iovec *iov, int iovcn
 	if (total > 0) {
 		return total;
 	}
+	if (ssl_err != SSL_ERROR_WANT_READ && ssl_err != SSL_ERROR_WANT_WRITE &&
+	    ssl_err != SSL_ERROR_WANT_CLIENT_HELLO_CB) {
+		ssl_log_fatal(ssl, "SSL_read", rc, ssl_err, sys_errno);
+	}
 
 	return posix_ssl_get_error(ssl, rc);
 }
@@ -989,11 +1040,11 @@ posix_ssl_readv(struct spdk_posix_sock *sock, const struct iovec *iov, int iovcn
 static ssize_t
 posix_ssl_writev(SSL *ssl, struct iovec *iov, int iovcnt)
 {
-	int i, rc = 0;
+	int i, rc = 0, ssl_err, sys_errno;
 	ssize_t total = 0;
 
 	/* Same queue rule as posix_ssl_readv(): a stale error makes SSL_get_error() lie. */
-	ERR_clear_error();
+	ssl_check_stale_err(ssl, "SSL_write");
 	for (i = 0; i < iovcnt; i++) {
 		rc = SSL_write(ssl, iov[i].iov_base, iov[i].iov_len);
 
@@ -1006,6 +1057,13 @@ posix_ssl_writev(SSL *ssl, struct iovec *iov, int iovcnt)
 	}
 	if (total > 0) {
 		return total;
+	}
+
+	sys_errno = errno;
+	ssl_err = SSL_get_error(ssl, rc);
+	if (ssl_err != SSL_ERROR_WANT_READ && ssl_err != SSL_ERROR_WANT_WRITE &&
+	    ssl_err != SSL_ERROR_WANT_CLIENT_HELLO_CB) {
+		ssl_log_fatal(ssl, "SSL_write", rc, ssl_err, sys_errno);
 	}
 
 	return posix_ssl_get_error(ssl, rc);
@@ -1830,6 +1888,8 @@ posix_sock_writev_async(struct spdk_sock *sock, struct spdk_sock_request *req)
 	if (sock->queued_iovcnt >= IOV_BATCH_SIZE) {
 		rc = _sock_flush(sock);
 		if (rc < 0 && rc != -EAGAIN && rc != -EBADF) {
+			SPDK_ERRLOG("sock flush failed fd %d rc %d (%s), aborting requests\n",
+				    (__posix_sock(sock))->fd, rc, spdk_strerror(-rc));
 			spdk_sock_abort_requests(sock);
 		}
 	}
@@ -2289,6 +2349,8 @@ posix_sock_group_impl_poll(struct spdk_sock_group_impl *_group, int max_events,
 	TAILQ_FOREACH_SAFE(sock, &_group->socks, link, tmp) {
 		rc = _sock_flush(sock);
 		if (rc < 0 && rc != -EAGAIN && rc != -EBADF) {
+			SPDK_ERRLOG("sock flush failed fd %d rc %d (%s), aborting requests\n",
+				    (__posix_sock(sock))->fd, rc, spdk_strerror(-rc));
 			spdk_sock_abort_requests(sock);
 		}
 	}
