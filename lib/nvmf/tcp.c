@@ -326,6 +326,8 @@ struct spdk_nvmf_tcp_qpair {
 
 	/* Wait until the host terminates the connection (e.g. after sending C2HTermReq) */
 	bool					wait_terminate;
+	/* A PDU write failed; nvmf_tcp_poll_group_poll() finishes the disconnect. */
+	bool					write_err;
 
 	/* Timer used to destroy qpair after detecting transport error issue if initiator does
 	 *  not close the connection.
@@ -356,6 +358,8 @@ struct spdk_nvmf_tcp_poll_group {
 	struct spdk_interrupt			*intr;
 
 	TAILQ_HEAD(, spdk_nvmf_tcp_qpair)	qpairs;
+	/* Number of qpairs in this group with write_err set */
+	uint32_t				num_write_err;
 
 	struct spdk_io_channel			*accel_channel;
 	struct spdk_nvmf_tcp_control_msg_list	*control_msg_list;
@@ -1219,6 +1223,28 @@ nvmf_tcp_qpair_disconnect(struct spdk_nvmf_tcp_qpair *tqpair)
 	}
 }
 
+/* A failed PDU write drops the rest of that PDU. QUIESCING normally advances
+ * only from the socket read callback, and a host waiting for C2H data sends
+ * nothing, so the qpair stays open until the host I/O timeout (30 s). Mark it
+ * and let nvmf_tcp_poll_group_poll() drive the disconnect on the next pass. */
+static void
+nvmf_tcp_qpair_write_failed(struct spdk_nvmf_tcp_qpair *tqpair)
+{
+	/* Called once per cancelled PDU, so it must be safe to repeat. */
+	if (tqpair->recv_state < NVME_TCP_PDU_RECV_STATE_QUIESCING) {
+		nvmf_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_QUIESCING);
+	}
+
+	/* Already marked, already shutting down, or not polled: nothing to schedule. */
+	if (tqpair->write_err || tqpair->state > NVMF_TCP_QPAIR_STATE_RUNNING ||
+	    tqpair->group == NULL) {
+		return;
+	}
+
+	tqpair->write_err = true;
+	tqpair->group->num_write_err++;
+}
+
 static void
 _mgmt_pdu_write_done(void *_tqpair, int err)
 {
@@ -1226,7 +1252,7 @@ _mgmt_pdu_write_done(void *_tqpair, int err)
 	struct nvme_tcp_pdu *pdu = tqpair->mgmt_pdu;
 
 	if (spdk_unlikely(err != 0)) {
-		nvmf_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_QUIESCING);
+		nvmf_tcp_qpair_write_failed(tqpair);
 		return;
 	}
 
@@ -1251,7 +1277,7 @@ _req_pdu_write_done(void *req, int err)
 	}
 
 	if (spdk_unlikely(err != 0)) {
-		nvmf_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_QUIESCING);
+		nvmf_tcp_qpair_write_failed(tqpair);
 		return;
 	}
 
@@ -3509,6 +3535,11 @@ nvmf_tcp_poll_group_remove(struct spdk_nvmf_transport_poll_group *group,
 	assert(tqpair->group == tgroup);
 
 	SPDK_DEBUGLOG(nvmf_tcp, "remove tqpair=%p from the tgroup=%p\n", tqpair, tgroup);
+	if (tqpair->write_err) {
+		tqpair->write_err = false;
+		assert(tgroup->num_write_err > 0);
+		tgroup->num_write_err--;
+	}
 	if (tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_AWAIT_REQ) {
 		/* Change the state to move the qpair from the await_req list to the main list
 		 * and prevent adding it again later by nvmf_tcp_qpair_set_recv_state() */
@@ -3592,6 +3623,28 @@ nvmf_tcp_poll_group_poll(struct spdk_nvmf_transport_poll_group *group)
 	if (spdk_unlikely(rc < 0)) {
 		SPDK_ERRLOG("spdk_sock_group_poll() failed, sock_group=%p, rc %d: %s\n", tgroup->sock_group, rc,
 			    spdk_strerror(-rc));
+	}
+
+	if (spdk_unlikely(tgroup->num_write_err > 0)) {
+		struct spdk_nvmf_tcp_qpair *tqpair, *tmp;
+
+		TAILQ_FOREACH_SAFE(tqpair, &tgroup->qpairs, link, tmp) {
+			if (!tqpair->write_err) {
+				continue;
+			}
+			if (tqpair->state <= NVMF_TCP_QPAIR_STATE_RUNNING &&
+			    tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_QUIESCING) {
+				nvmf_tcp_qpair_process(tqpair);
+			}
+			/* Keep retrying while PDUs are still being received into this qpair.
+			 * poll_group_remove() may already have cleared write_err. */
+			if (tqpair->write_err &&
+			    (tqpair->state > NVMF_TCP_QPAIR_STATE_RUNNING ||
+			     tqpair->recv_state != NVME_TCP_PDU_RECV_STATE_QUIESCING)) {
+				tqpair->write_err = false;
+				tgroup->num_write_err--;
+			}
+		}
 	}
 
 	return rc;
