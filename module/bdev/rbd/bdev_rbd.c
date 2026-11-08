@@ -19,6 +19,7 @@
 #include "spdk/likely.h"
 #include "spdk/bdev_module.h"
 #include "spdk/log.h"
+#include "spdk/queue.h"
 
 SPDK_LOG_REGISTER_COMPONENT(reservation)
 
@@ -28,6 +29,32 @@ static int bdev_rbd_count = 0;
  * global parameter to control CRC32C usage in RBD write operations.
  */
 static bool g_rbd_with_crc32c = false;
+
+/*
+ * Slow/stuck I/O diagnostics, off by default. Turn them on or off at runtime
+ * with the bdev_rbd_set_diag RPC, or at startup with SPDK_RBD_DIAG=1 in the
+ * environment. Each SPDK thread keeps its own copy of the settings in its
+ * bdev_rbd_group_channel, updated on that thread, so the I/O path reads
+ * them without synchronization. Off, the I/O path takes no timestamps, does
+ * no list or atomic updates, and no watchdog is registered.
+ * On, every I/O records a few TSC timestamps on its way through this module;
+ * nothing is logged unless an I/O is slow:
+ *  - "slow io done": an I/O took longer than g_rbd_slow_io_ms end to end.
+ *  - "stuck io":     a per-thread watchdog found an I/O outstanding longer
+ *                    than g_rbd_stuck_io_ms (reported once per I/O).
+ *  - "aio call blocked": the rbd_aio_*() call itself took longer than
+ *                    g_rbd_slow_io_ms / RBD_BLOCKED_CALL_DIV.
+ * Startup thresholds come from SPDK_RBD_SLOW_IO_MS and SPDK_RBD_STUCK_IO_MS,
+ * runtime ones from the RPC; 0 disables that check. The g_rbd_* values are
+ * the current settings, read and written on the app thread and copied to
+ * each thread's group channel.
+ */
+#define RBD_BLOCKED_CALL_DIV	20
+static bool g_rbd_diag_enable = false;
+static uint64_t g_rbd_slow_io_ms = 2000;
+static uint64_t g_rbd_stuck_io_ms = 5000;
+static uint64_t g_rbd_slow_io_ticks;
+static uint64_t g_rbd_stuck_io_ticks;
 
 struct bdev_rbd_pool_ctx {
 	rados_t *cluster_p;
@@ -87,6 +114,18 @@ struct bdev_rbd_io_channel {
 	struct spdk_io_channel *group_ch;
 };
 
+struct bdev_rbd_io;
+
+/* Per-thread context of the rbd_if io_device (one per SPDK thread). */
+struct bdev_rbd_group_channel {
+	TAILQ_HEAD(, bdev_rbd_io)	ios;		/* outstanding I/O, in submit order */
+	struct spdk_poller		*watchdog;
+	/* This thread's copy of the diagnostics settings (bdev_rbd_set_diag()). */
+	bool				diag;
+	uint64_t			slow_io_ticks;
+	uint64_t			stuck_io_ticks;
+};
+
 struct bdev_rbd_io {
 	struct			spdk_thread *submit_td;
 	enum			spdk_bdev_io_status status;
@@ -94,6 +133,18 @@ struct bdev_rbd_io {
 	size_t			total_len;
 	uint32_t		precomputed_crc32c;  /* CRC32C checksum from NVMf layer */
 	bool			has_crc32c;          /* Whether CRC32C is available */
+
+	/*
+	 * Instrumentation. Everything here is only touched on submit_td,
+	 * except t_cb, which librbd's callback thread stores atomically.
+	 */
+	TAILQ_ENTRY(bdev_rbd_io)	link;
+	struct bdev_rbd_group_channel	*group;
+	uint64_t		t_submit;	/* bdev_rbd_submit_request() */
+	uint64_t		t_start;	/* just before rbd_aio_*() */
+	uint64_t		t_cb;		/* librbd completion callback */
+	bool			tracked;	/* on group->ios */
+	bool			wd_reported;	/* watchdog already logged it */
 };
 
 struct bdev_rbd_cluster {
@@ -695,12 +746,75 @@ bdev_rbd_init(struct bdev_rbd *rbd)
 	return ret;
 }
 
+static double
+bdev_rbd_delta_ms(uint64_t from, uint64_t to)
+{
+	if (from == 0 || to == 0 || to < from) {
+		return -1.0;
+	}
+	return (double)(to - from) * 1000.0 / (double)spdk_get_ticks_hz();
+}
+
+static const char *
+bdev_rbd_io_stage(const struct bdev_rbd_io *rbd_io, uint64_t t_cb)
+{
+	if (rbd_io->t_start == 0) {
+		return "not_sent_to_librbd";
+	}
+	if (t_cb == 0) {
+		return "waiting_for_librbd_callback";
+	}
+	return "callback_done_waiting_for_completion_msg";
+}
+
+/*
+ * Log one I/O's timeline. Columns (ms, -1 = not reached):
+ *   total       bdev layer submit -> now
+ *   bdev_q      bdev layer submit -> bdev_rbd_submit_request()
+ *   rbd_q       bdev_rbd_submit_request() -> rbd_aio_*() (buffer wait for reads)
+ *   librbd      rbd_aio_*() -> librbd completion callback
+ *   msg         librbd callback -> now (completion message to submit thread)
+ * comp is the librbd completion pointer, for matching against librbd logs.
+ */
+static void
+bdev_rbd_io_log(const char *what, struct spdk_bdev_io *bdev_io, struct bdev_rbd_io *rbd_io,
+		uint64_t now)
+{
+	uint64_t t_cb = __atomic_load_n(&rbd_io->t_cb, __ATOMIC_ACQUIRE);
+	uint64_t t_bdev = spdk_bdev_io_get_submit_tsc(bdev_io);
+
+	SPDK_NOTICELOG("rbd %s: bdev %s type %d off %" PRIu64 " len %" PRIu64 " thread %s comp %p "
+		       "stage %s total %.1f bdev_q %.1f rbd_q %.1f librbd %.1f msg %.1f (ms)\n",
+		       what, bdev_io->bdev->name, bdev_io->type,
+		       bdev_io->u.bdev.offset_blocks * bdev_io->bdev->blocklen,
+		       bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen,
+		       spdk_thread_get_name(spdk_get_thread()), (void *)rbd_io->comp,
+		       bdev_rbd_io_stage(rbd_io, t_cb),
+		       bdev_rbd_delta_ms(t_bdev, now),
+		       bdev_rbd_delta_ms(t_bdev, rbd_io->t_submit),
+		       bdev_rbd_delta_ms(rbd_io->t_submit, rbd_io->t_start),
+		       bdev_rbd_delta_ms(rbd_io->t_start, t_cb),
+		       bdev_rbd_delta_ms(t_cb, now));
+}
+
 static void
 _bdev_rbd_io_complete(void *_rbd_io)
 {
 	struct bdev_rbd_io *rbd_io = _rbd_io;
+	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(rbd_io);
 
-	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(rbd_io), rbd_io->status);
+	if (rbd_io->tracked) {
+		uint64_t now = spdk_get_ticks();
+
+		TAILQ_REMOVE(&rbd_io->group->ios, rbd_io, link);
+		rbd_io->tracked = false;
+		if (rbd_io->group->slow_io_ticks != 0 &&
+		    now - spdk_bdev_io_get_submit_tsc(bdev_io) > rbd_io->group->slow_io_ticks) {
+			bdev_rbd_io_log("slow io done", bdev_io, rbd_io, now);
+		}
+	}
+
+	spdk_bdev_io_complete(bdev_io, rbd_io->status);
 }
 
 static void
@@ -708,11 +822,17 @@ bdev_rbd_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status stat
 {
 	struct bdev_rbd_io *rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
 	struct spdk_thread *current_thread = spdk_get_thread();
+	int rc;
 
 	rbd_io->status = status;
 	assert(rbd_io->submit_td != NULL);
 	if (rbd_io->submit_td != current_thread) {
-		spdk_thread_send_msg(rbd_io->submit_td, _bdev_rbd_io_complete, rbd_io);
+		rc = spdk_thread_send_msg(rbd_io->submit_td, _bdev_rbd_io_complete, rbd_io);
+		if (spdk_unlikely(rc != 0)) {
+			SPDK_ERRLOG("rbd: failed to send completion of bdev %s I/O to thread %s: %d; "
+				    "the I/O will never complete\n", bdev_io->bdev->name,
+				    spdk_thread_get_name(rbd_io->submit_td), rc);
+		}
 	} else {
 		_bdev_rbd_io_complete(rbd_io);
 	}
@@ -728,6 +848,10 @@ bdev_rbd_finish_aiocb(rbd_completion_t cb, void *arg)
 
 	bdev_io = rbd_aio_get_arg(cb);
 	rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
+	/* librbd's thread: only tracked is safe to read here (set before rbd_aio_*()). */
+	if (spdk_unlikely(rbd_io->tracked)) {
+		__atomic_store_n(&rbd_io->t_cb, spdk_get_ticks(), __ATOMIC_RELEASE);
+	}
 	io_status = rbd_aio_get_return_value(cb);
 	bio_status = SPDK_BDEV_IO_STATUS_SUCCESS;
 
@@ -756,11 +880,26 @@ _bdev_rbd_start_aio(struct bdev_rbd *disk, struct spdk_bdev_io *bdev_io,
 	int ret;
 	struct bdev_rbd_io *rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
 	rbd_image_t image = disk->image;
+	/*
+	 * librbd may complete the request inline, and bdev_io may then be
+	 * completed and reused before rbd_aio_*() returns, so the blocked-call
+	 * check below uses only these locals, never rbd_io/bdev_io.
+	 */
+	enum spdk_bdev_io_type io_type = bdev_io->type;
+	uint64_t t_call, slow_io_ticks;
 
 	ret = rbd_aio_create_completion(bdev_io, bdev_rbd_finish_aiocb,
 					&rbd_io->comp);
 	if (ret < 0) {
 		goto err;
+	}
+
+	/* On submit_td, so this thread's settings; diag may have changed since submit. */
+	slow_io_ticks = rbd_io->group->diag ? rbd_io->group->slow_io_ticks : 0;
+	t_call = 0;
+	if (spdk_unlikely(rbd_io->tracked || slow_io_ticks != 0)) {
+		t_call = spdk_get_ticks();
+		rbd_io->t_start = t_call;
 	}
 
 	switch (bdev_io->type) {
@@ -811,6 +950,17 @@ _bdev_rbd_start_aio(struct bdev_rbd *disk, struct spdk_bdev_io *bdev_io,
 		SPDK_ERRLOG("Unsupported IO type =%d\n", bdev_io->type);
 		ret = -ENOTSUP;
 		break;
+	}
+
+	if (spdk_unlikely(slow_io_ticks != 0)) {
+		uint64_t call_ticks = spdk_get_ticks() - t_call;
+
+		if (call_ticks > slow_io_ticks / RBD_BLOCKED_CALL_DIV) {
+			SPDK_NOTICELOG("rbd aio call blocked: bdev %s type %d off %" PRIu64 " len %zu "
+				       "thread %s rc %d took %.1f ms\n", disk->disk.name, io_type,
+				       offset, len, spdk_thread_get_name(spdk_get_thread()), ret,
+				       bdev_rbd_delta_ms(t_call, t_call + call_ticks));
+		}
 	}
 
 	if (ret < 0) {
@@ -1017,11 +1167,26 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 {
 	struct spdk_thread *submit_td = spdk_io_channel_get_thread(ch);
 	struct bdev_rbd_io *rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
+	struct bdev_rbd_io_channel *rbd_ch = spdk_io_channel_get_ctx(ch);
+	struct bdev_rbd_group_channel *group = spdk_io_channel_get_ctx(rbd_ch->group_ch);
 	struct bdev_rbd *rbd = NULL;
 
 	rbd_io->submit_td = submit_td;
 	rbd_io->has_crc32c = false;  /* Initialize CRC32C fields */
 	rbd_io->precomputed_crc32c = 0;
+
+	/*
+	 * driver_ctx is not zeroed between I/Os. group (this thread's settings)
+	 * and tracked (what completion checks) are set even with diagnostics off.
+	 */
+	rbd_io->group = group;
+	rbd_io->tracked = false;
+	if (spdk_unlikely(group->diag)) {
+		rbd_io->wd_reported = false;
+		rbd_io->t_submit = spdk_get_ticks();
+		rbd_io->t_start = 0;
+		__atomic_store_n(&rbd_io->t_cb, 0, __ATOMIC_RELAXED);
+	}
 
 	if (bdev_io->bdev) {
 		rbd = (struct bdev_rbd *)bdev_io->bdev->ctxt;
@@ -1032,6 +1197,15 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 		SPDK_DEBUGLOG(bdev_rbd, "Fail IO of type %d for bdev %s\n", bdev_io->type, bdev_name ? bdev_name : "<n/a>");
 		bdev_rbd_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return;
+	}
+
+	/*
+	 * Track everything except RESET, which completes from the app thread's
+	 * reset poller rather than through librbd.
+	 */
+	if (spdk_unlikely(group->diag) && bdev_io->type != SPDK_BDEV_IO_TYPE_RESET) {
+		TAILQ_INSERT_TAIL(&group->ios, rbd_io, link);
+		rbd_io->tracked = true;
 	}
 
 	/* check if CRC32C is available from the I/O options */
@@ -1919,15 +2093,144 @@ exit:
 	return rc;
 }
 
+/*
+ * Runs once a second on each thread with an rbd channel. ios is in submit
+ * order, so the walk stops at the first I/O younger than the threshold.
+ */
+static int
+bdev_rbd_watchdog_poll(void *arg)
+{
+	struct bdev_rbd_group_channel *group = arg;
+	struct bdev_rbd_io *rbd_io;
+	uint64_t now = spdk_get_ticks();
+	int reported = 0;
+
+	TAILQ_FOREACH(rbd_io, &group->ios, link) {
+		if (now - rbd_io->t_submit < group->stuck_io_ticks) {
+			break;
+		}
+		if (!rbd_io->wd_reported) {
+			rbd_io->wd_reported = true;
+			bdev_rbd_io_log("stuck io", spdk_bdev_io_from_ctx(rbd_io), rbd_io, now);
+			reported++;
+		}
+	}
+
+	return reported > 0 ? SPDK_POLLER_BUSY : SPDK_POLLER_IDLE;
+}
+
+/*
+ * Copy the current diagnostics settings into this thread's group channel and
+ * start or stop its watchdog. Runs on the group channel's thread. I/O already
+ * tracked when diagnostics go off stays on the list until it completes.
+ */
+static void
+bdev_rbd_group_apply_diag(struct bdev_rbd_group_channel *group)
+{
+	group->diag = g_rbd_diag_enable;
+	group->slow_io_ticks = g_rbd_diag_enable ? g_rbd_slow_io_ticks : 0;
+	group->stuck_io_ticks = g_rbd_diag_enable ? g_rbd_stuck_io_ticks : 0;
+
+	if (group->stuck_io_ticks != 0) {
+		if (group->watchdog == NULL) {
+			group->watchdog = SPDK_POLLER_REGISTER(bdev_rbd_watchdog_poll, group,
+							       1000 * 1000);
+		}
+	} else {
+		spdk_poller_unregister(&group->watchdog);
+	}
+}
+
 static int
 bdev_rbd_group_create_cb(void *io_device, void *ctx_buf)
 {
+	struct bdev_rbd_group_channel *group = ctx_buf;
+
+	TAILQ_INIT(&group->ios);
+	group->watchdog = NULL;
+	bdev_rbd_group_apply_diag(group);
 	return 0;
 }
 
 static void
 bdev_rbd_group_destroy_cb(void *io_device, void *ctx_buf)
 {
+	struct bdev_rbd_group_channel *group = ctx_buf;
+
+	spdk_poller_unregister(&group->watchdog);
+	if (!TAILQ_EMPTY(&group->ios)) {
+		SPDK_WARNLOG("rbd: destroying thread %s rbd channel with I/O still outstanding\n",
+			     spdk_thread_get_name(spdk_get_thread()));
+	}
+}
+
+struct bdev_rbd_set_diag_ctx {
+	bdev_rbd_set_diag_cb	cb_fn;
+	void			*cb_arg;
+};
+
+static bool g_rbd_diag_busy;
+
+static void
+bdev_rbd_set_diag_ch(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+
+	bdev_rbd_group_apply_diag(spdk_io_channel_get_ctx(ch));
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+bdev_rbd_set_diag_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct bdev_rbd_set_diag_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+
+	g_rbd_diag_busy = false;
+	SPDK_NOTICELOG("rbd: I/O diagnostics %s: slow io log > %" PRIu64 " ms, stuck io watchdog > %"
+		       PRIu64 " ms (0 = off)\n", g_rbd_diag_enable ? "on" : "off",
+		       g_rbd_slow_io_ms, g_rbd_stuck_io_ms);
+	ctx->cb_fn(ctx->cb_arg, status);
+	free(ctx);
+}
+
+void
+bdev_rbd_get_diag(bool *enable, uint64_t *slow_io_ms, uint64_t *stuck_io_ms)
+{
+	*enable = g_rbd_diag_enable;
+	*slow_io_ms = g_rbd_slow_io_ms;
+	*stuck_io_ms = g_rbd_stuck_io_ms;
+}
+
+int
+bdev_rbd_set_diag(bool enable, uint64_t slow_io_ms, uint64_t stuck_io_ms,
+		  bdev_rbd_set_diag_cb cb_fn, void *cb_arg)
+{
+	struct bdev_rbd_set_diag_ctx *ctx;
+
+	assert(spdk_thread_is_app_thread(NULL));
+	if (g_rbd_diag_busy) {
+		return -EBUSY;
+	}
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		return -ENOMEM;
+	}
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	g_rbd_diag_enable = enable;
+	if (slow_io_ms != BDEV_RBD_DIAG_KEEP) {
+		g_rbd_slow_io_ms = slow_io_ms;
+	}
+	if (stuck_io_ms != BDEV_RBD_DIAG_KEEP) {
+		g_rbd_stuck_io_ms = stuck_io_ms;
+	}
+	g_rbd_slow_io_ticks = g_rbd_slow_io_ms * spdk_get_ticks_hz() / 1000;
+	g_rbd_stuck_io_ticks = g_rbd_stuck_io_ms * spdk_get_ticks_hz() / 1000;
+
+	g_rbd_diag_busy = true;
+	spdk_for_each_channel(&rbd_if, bdev_rbd_set_diag_ch, ctx, bdev_rbd_set_diag_done);
+	return 0;
 }
 #define RESERVATION_KEY   "reservation_key"
 #define MAX_RESERV_FILE_SIZE  4096
@@ -2154,11 +2457,39 @@ err:
 }
 
 
+static uint64_t
+bdev_rbd_env_ms(const char *name, uint64_t dflt)
+{
+	const char *val = getenv(name);
+	unsigned long long ms;
+	char *end;
+
+	if (val == NULL || *val == '\0') {
+		return dflt;
+	}
+	errno = 0;
+	ms = strtoull(val, &end, 10);
+	if (errno != 0 || *end != '\0') {
+		SPDK_WARNLOG("rbd: ignoring invalid %s=%s, using %" PRIu64 "\n", name, val, dflt);
+		return dflt;
+	}
+	return ms;
+}
+
 static int
 bdev_rbd_library_init(void)
 {
+	g_rbd_diag_enable = bdev_rbd_env_ms("SPDK_RBD_DIAG", 0) != 0;
+	g_rbd_slow_io_ms = bdev_rbd_env_ms("SPDK_RBD_SLOW_IO_MS", g_rbd_slow_io_ms);
+	g_rbd_stuck_io_ms = bdev_rbd_env_ms("SPDK_RBD_STUCK_IO_MS", g_rbd_stuck_io_ms);
+	g_rbd_slow_io_ticks = g_rbd_slow_io_ms * spdk_get_ticks_hz() / 1000;
+	g_rbd_stuck_io_ticks = g_rbd_stuck_io_ms * spdk_get_ticks_hz() / 1000;
+	SPDK_NOTICELOG("rbd: I/O diagnostics %s (bdev_rbd_set_diag RPC to change): slow io log > %"
+		       PRIu64 " ms, stuck io watchdog > %" PRIu64 " ms (0 = off)\n",
+		       g_rbd_diag_enable ? "on" : "off", g_rbd_slow_io_ms, g_rbd_stuck_io_ms);
+
 	spdk_io_device_register(&rbd_if, bdev_rbd_group_create_cb, bdev_rbd_group_destroy_cb,
-				0, "bdev_rbd_poll_groups");
+				sizeof(struct bdev_rbd_group_channel), "bdev_rbd_poll_groups");
 	return 0;
 }
 
