@@ -2742,6 +2742,31 @@
       ]
     },
     {
+      "name": "bdev_rbd_set_diag",
+      "params": [
+        {
+          "name": "enable",
+          "type": "boolean",
+          "required": true,
+          "description": "Turn diagnostics on"
+        },
+        {
+          "name": "slow_io_ms",
+          "type": "uint64",
+          "description": "Log I/O slower than this many ms when it completes (0 = off; default: keep)"
+        },
+        {
+          "name": "stuck_io_ms",
+          "type": "uint64",
+          "description": "Log I/O outstanding longer than this many ms (0 = off; default: keep)"
+        }
+      ]
+    },
+    {
+      "name": "bdev_rbd_get_diag",
+      "params": []
+    },
+    {
       "name": "bdev_delay_create",
       "params": [
         {

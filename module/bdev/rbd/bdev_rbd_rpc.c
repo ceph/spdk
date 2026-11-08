@@ -373,3 +373,105 @@ SPDK_RPC_REGISTER("bdev_rbd_wait_for_latest_osdmap", rpc_bdev_rbd_wait_for_lates
 
 SPDK_RPC_REGISTER("bdev_rbd_get_with_crc32c", rpc_bdev_rbd_get_with_crc32c, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER("bdev_rbd_set_with_crc32c", rpc_bdev_rbd_set_with_crc32c, SPDK_RPC_STARTUP)
+
+/* Upper bound for the diagnostics thresholds (1 day), so ms * ticks_hz can't overflow. */
+#define RPC_BDEV_RBD_DIAG_MAX_MS	(24ULL * 60 * 60 * 1000)
+
+static void
+rpc_bdev_rbd_write_diag(struct spdk_jsonrpc_request *request)
+{
+	struct spdk_json_write_ctx *w;
+	bool enable;
+	uint64_t slow_io_ms, stuck_io_ms;
+
+	bdev_rbd_get_diag(&enable, &slow_io_ms, &stuck_io_ms);
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_bool(w, "enable", enable);
+	spdk_json_write_named_uint64(w, "slow_io_ms", slow_io_ms);
+	spdk_json_write_named_uint64(w, "stuck_io_ms", stuck_io_ms);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+}
+
+static void
+rpc_bdev_rbd_get_diag(struct spdk_jsonrpc_request *request,
+		      const struct spdk_json_val *params)
+{
+	if (params != NULL) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "bdev_rbd_get_diag requires no parameters");
+		return;
+	}
+	rpc_bdev_rbd_write_diag(request);
+}
+SPDK_RPC_REGISTER("bdev_rbd_get_diag", rpc_bdev_rbd_get_diag, SPDK_RPC_RUNTIME)
+
+static const struct spdk_json_object_decoder rpc_bdev_rbd_set_diag_decoders[] = {
+	{"enable", offsetof(struct rpc_bdev_rbd_set_diag_ctx, enable), spdk_json_decode_bool},
+	{"slow_io_ms", offsetof(struct rpc_bdev_rbd_set_diag_ctx, slow_io_ms), spdk_json_decode_uint64, true},
+	{"stuck_io_ms", offsetof(struct rpc_bdev_rbd_set_diag_ctx, stuck_io_ms), spdk_json_decode_uint64, true},
+};
+
+static void
+rpc_bdev_rbd_set_diag_done(void *cb_arg, int rc)
+{
+	struct rpc_bdev_rbd_set_diag_ctx *req = cb_arg;
+	struct spdk_jsonrpc_request *request = req->request;
+
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		return;
+	}
+
+	rpc_bdev_rbd_write_diag(request);
+}
+
+/*
+ * Turn slow/stuck I/O diagnostics on or off without restarting. Thresholds
+ * that aren't given keep their current values. Returns the new settings once
+ * every SPDK thread has them.
+ */
+static void
+rpc_bdev_rbd_set_diag(struct spdk_jsonrpc_request *request,
+		      const struct spdk_json_val *params)
+{
+	struct rpc_bdev_rbd_set_diag_ctx *req;
+	int rc;
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Out of memory");
+		return;
+	}
+
+	req->request = request;
+	req->slow_io_ms = BDEV_RBD_DIAG_KEEP;
+	req->stuck_io_ms = BDEV_RBD_DIAG_KEEP;
+
+	if (spdk_json_decode_object(params, rpc_bdev_rbd_set_diag_decoders,
+				    SPDK_COUNTOF(rpc_bdev_rbd_set_diag_decoders), req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "spdk_json_decode_object failed");
+		return;
+	}
+	if ((req->slow_io_ms != BDEV_RBD_DIAG_KEEP && req->slow_io_ms > RPC_BDEV_RBD_DIAG_MAX_MS) ||
+	    (req->stuck_io_ms != BDEV_RBD_DIAG_KEEP && req->stuck_io_ms > RPC_BDEV_RBD_DIAG_MAX_MS)) {
+		spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						     "slow_io_ms and stuck_io_ms must be <= %llu",
+						     RPC_BDEV_RBD_DIAG_MAX_MS);
+		free_rpc_bdev_rbd_set_diag(req);
+		free(req);
+		return;
+	}
+
+	rc = bdev_rbd_set_diag(req->enable, req->slow_io_ms, req->stuck_io_ms,
+			       rpc_bdev_rbd_set_diag_done, req);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+	}
+
+	free_rpc_bdev_rbd_set_diag(req);
+	free(req);
+}
+SPDK_RPC_REGISTER("bdev_rbd_set_diag", rpc_bdev_rbd_set_diag, SPDK_RPC_RUNTIME)
