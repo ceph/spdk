@@ -214,6 +214,28 @@ struct spdk_bdev_qos {
 
 	/** Does the poller have a message queued already */
 	bool busy;
+
+	/*
+	 * Round-robin state for releasing queued I/O across channels, see
+	 * bdev_channel_submit_qos_io(). Positions are a channel's index in
+	 * spdk_bdev_for_each_channel() order. Only touched by the iteration,
+	 * which is serialized by busy.
+	 */
+	/** Position of the channel to serve first in the next round. */
+	uint32_t rr_start;
+	/** Position of the channel being visited in the current pass. */
+	uint32_t iter_pos;
+	/** 0: serve positions >= rr_start, 1: serve positions < rr_start. */
+	uint32_t iter_pass;
+	/** Position of the last channel that submitted I/O this round. */
+	uint32_t last_served_pos;
+	/**
+	 * Channel count seen by the last pass that visited every channel; 0 until
+	 * one has. A pass stopped early on quota has visited only some of them.
+	 */
+	uint32_t num_channels;
+	/** Whether any channel submitted I/O this round. */
+	bool served;
 };
 
 struct spdk_bdev_mgmt_channel {
@@ -4259,29 +4281,114 @@ bdev_qos_update_max_quota_per_timeslice(struct spdk_bdev_qos *qos)
 	bdev_qos_set_ops(qos);
 }
 
+/*
+ * True when a read/write limit (one that applies to every I/O) has no quota
+ * left in this timeslice, so no channel can submit anything more.
+ */
+static bool
+bdev_qos_rw_quota_exhausted(struct spdk_bdev_qos *qos)
+{
+	static const int rw_limits[] = {
+		SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT,
+		SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT,
+	};
+	size_t i;
+
+	for (i = 0; i < SPDK_COUNTOF(rw_limits); i++) {
+		struct spdk_bdev_qos_limit *limit = &qos->rate_limits[rw_limits[i]];
+
+		if (limit->limit != SPDK_BDEV_QOS_LIMIT_NOT_DEFINED &&
+		    __atomic_load_n(&limit->remaining_this_timeslice, __ATOMIC_RELAXED) <= 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Release queued I/O on each channel once per timeslice.
+ *
+ * Every channel shares one quota, and the channels are always iterated in
+ * the same order. Stopping at the first channel that still has a backlog,
+ * as this used to, let the first busy channel take the whole quota every
+ * timeslice, and a channel later in the order could starve indefinitely:
+ * a channel whose submitter has nothing more to send (e.g. an NVMe-oF qpair
+ * at its queue depth limit) only gets its queue drained here.
+ *
+ * Instead, rotate the starting channel. A round serves positions >= rr_start
+ * (pass 0), then, while quota remains, positions < rr_start (pass 1). The
+ * next round starts after the last channel that got to submit, so a
+ * backlogged channel waits at most about one timeslice per active channel.
+ * The iteration only stops early once the read/write quota is used up.
+ */
 static void
 bdev_channel_submit_qos_io(struct spdk_bdev_channel_iter *i, struct spdk_bdev *bdev,
 			   struct spdk_io_channel *io_ch, void *ctx)
 {
 	struct spdk_bdev_channel *bdev_ch = __io_ch_to_bdev_ch(io_ch);
-	int status;
+	struct spdk_bdev_qos *qos = bdev->internal.qos;
+	uint32_t pos = qos->iter_pos++;
+	bool in_pass = qos->iter_pass == 0 ? pos >= qos->rr_start : pos < qos->rr_start;
+	int status = 0;
 
-	bdev_qos_io_submit(bdev_ch, bdev->internal.qos);
-
-	/* if all IOs were sent then continue the iteration, otherwise - stop it */
-	/* TODO: channels round robing */
-	status = TAILQ_EMPTY(&bdev_ch->qos_queued_io) ? 0 : 1;
+	if (in_pass && !TAILQ_EMPTY(&bdev_ch->qos_queued_io)) {
+		if (bdev_qos_io_submit(bdev_ch, qos) > 0) {
+			qos->last_served_pos = pos;
+			qos->served = true;
+		}
+		if (bdev_qos_rw_quota_exhausted(qos)) {
+			status = 1;
+		}
+	}
 
 	spdk_bdev_for_each_channel_continue(i, status);
 }
 
-
 static void
 bdev_channel_submit_qos_io_done(struct spdk_bdev *bdev, void *ctx, int status)
 {
-	if (bdev && bdev->internal.qos) {
-		bdev->internal.qos->busy = false;
+	struct spdk_bdev_qos *qos;
+
+	if (bdev == NULL || bdev->internal.qos == NULL) {
+		return;
 	}
+	qos = bdev->internal.qos;
+
+	/* status 0: this pass visited every channel, so iter_pos is the channel count. */
+	if (status == 0) {
+		qos->num_channels = qos->iter_pos;
+	}
+
+	/* Pass 0 visited every channel and quota is left: serve the ones before rr_start. */
+	if (status == 0 && qos->iter_pass == 0 && qos->rr_start > 0 && qos->thread != NULL &&
+	    !bdev_qos_rw_quota_exhausted(qos)) {
+		qos->iter_pass = 1;
+		qos->iter_pos = 0;
+		spdk_bdev_for_each_channel(bdev, bdev_channel_submit_qos_io, qos,
+					   bdev_channel_submit_qos_io_done);
+		return;
+	}
+
+	/*
+	 * Start the next round after the last channel that submitted, wrapping to
+	 * 0 after the last channel so the next round doesn't begin with a pass 0
+	 * that serves nothing (one for_each_channel walk across every reactor).
+	 *
+	 * Wrap on num_channels, not iter_pos: when the walk stopped early on quota,
+	 * iter_pos is last_served_pos + 1, and wrapping on it would restart every
+	 * round at channel 0, starving the later channels again. Until a full pass
+	 * has counted the channels (and after channels are added or removed) a
+	 * round may still start past the end; that pass 0 visits every channel and
+	 * so sets num_channels, and the wrap applies from the next round.
+	 */
+	if (qos->served) {
+		qos->rr_start = qos->last_served_pos + 1;
+		if (qos->num_channels != 0 && qos->rr_start >= qos->num_channels) {
+			qos->rr_start = 0;
+		}
+	}
+	qos->busy = false;
 }
 
 static int
@@ -4336,8 +4443,11 @@ bdev_channel_poll_qos(void *arg)
 
 	if (!qos->busy) {
 		qos->busy = true;
+		qos->iter_pass = 0;
+		qos->iter_pos = 0;
+		qos->served = false;
 		spdk_bdev_for_each_channel(bdev, bdev_channel_submit_qos_io, qos,
-				   	bdev_channel_submit_qos_io_done);
+					   bdev_channel_submit_qos_io_done);
 	}
 
 	return SPDK_POLLER_BUSY;
