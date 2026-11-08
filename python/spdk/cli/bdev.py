@@ -508,6 +508,30 @@ def add_parser(subparsers):
     p.add_argument('new_size', help='new bdev size for resize operation. The unit is MiB', type=int)
     p.set_defaults(func=bdev_rbd_resize)
 
+    def bdev_rbd_set_diag(args):
+        print_json(args.client.bdev_rbd_set_diag(
+                                              enable=args.enable,
+                                              slow_io_ms=args.slow_io_ms,
+                                              stuck_io_ms=args.stuck_io_ms))
+
+    p = subparsers.add_parser('bdev_rbd_set_diag',
+                              help='Turn rbd slow/stuck I/O diagnostics on or off at runtime')
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument('-e', '--enable', dest='enable', action='store_true', help='Turn diagnostics on')
+    group.add_argument('-d', '--disable', dest='enable', action='store_false', help='Turn diagnostics off')
+    p.add_argument('-s', '--slow-io-ms', type=int,
+                   help='Log I/O slower than this many ms when it completes (0 = off; default: keep)')
+    p.add_argument('-t', '--stuck-io-ms', type=int,
+                   help='Log I/O outstanding longer than this many ms (0 = off; default: keep)')
+    p.set_defaults(func=bdev_rbd_set_diag)
+
+    def bdev_rbd_get_diag(args):
+        print_json(args.client.bdev_rbd_get_diag())
+
+    p = subparsers.add_parser('bdev_rbd_get_diag',
+                              help='Show rbd slow/stuck I/O diagnostics settings')
+    p.set_defaults(func=bdev_rbd_get_diag)
+
     def bdev_delay_create(args):
         print_json(args.client.bdev_delay_create(
                                               base_bdev_name=args.base_bdev_name,

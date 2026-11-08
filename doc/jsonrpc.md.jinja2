@@ -4284,6 +4284,70 @@ Example response:
 }
 ~~~
 
+### bdev_rbd_set_diag {#rpc_bdev_rbd_set_diag}
+
+{{ bdev_rbd_set_diag_description }}
+
+#### Parameters
+
+{{ bdev_rbd_set_diag_params }}
+
+#### Response
+
+{{ bdev_rbd_set_diag_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("bdev_rbd_set_diag", "--enable", "--slow-io-ms", "0", "--stuck-io-ms", "6500") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "enable": true,
+    "slow_io_ms": 0,
+    "stuck_io_ms": 6500
+  }
+}
+~~~
+
+### bdev_rbd_get_diag {#rpc_bdev_rbd_get_diag}
+
+{{ bdev_rbd_get_diag_description }}
+
+#### Parameters
+
+{{ bdev_rbd_get_diag_params }}
+
+#### Response
+
+{{ bdev_rbd_get_diag_response }}
+
+#### Example
+
+Example request:
+
+{{ example_request("bdev_rbd_get_diag") }}
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "enable": true,
+    "slow_io_ms": 3500,
+    "stuck_io_ms": 6500
+  }
+}
+~~~
+
 ### bdev_delay_create {#rpc_bdev_delay_create}
 
 {{ bdev_delay_create_description }}
