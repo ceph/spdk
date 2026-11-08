@@ -1271,6 +1271,90 @@ io_during_qos_queue(void)
 	teardown_test();
 }
 
+/*
+ * A channel that queued I/O behind an exhausted quota and then submits
+ * nothing more (e.g. an NVMe-oF qpair at its queue depth) depends on the
+ * per-timeslice release to drain its queue. It must get served within a
+ * few timeslices even while another channel stays backlogged, instead of
+ * waiting for that channel's whole backlog to drain first.
+ */
+static void
+qos_channel_fairness(void)
+{
+	struct spdk_io_channel *io_ch[2];
+	enum spdk_bdev_io_status status0[10], status1;
+	struct spdk_bdev *bdev;
+	int rc, i, rounds;
+
+	setup_test();
+	MOCK_SET(spdk_get_ticks, 0);
+
+	bdev = &g_bdev.bdev;
+	bdev->internal.qos = calloc(1, sizeof(*bdev->internal.qos));
+	SPDK_CU_ASSERT_FATAL(bdev->internal.qos != NULL);
+	/* What spdk_bdev_set_qos_rate_limits() sets; 0 makes the timeslice loop spin. */
+	bdev->internal.qos->timeslice_in_usecs = SPDK_BDEV_QOS_TIMESLICE_IN_USEC;
+	/* 1000 read/write I/O per second, or 1 per millisecond */
+	bdev->internal.qos->rate_limits[SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT].limit = 1000;
+
+	g_get_io_channel = true;
+
+	set_thread(0);
+	io_ch[0] = spdk_bdev_get_io_channel(g_desc);
+	set_thread(1);
+	io_ch[1] = spdk_bdev_get_io_channel(g_desc);
+
+	/* Thread 0 builds a backlog: the first I/O uses this timeslice's quota. */
+	set_thread(0);
+	for (i = 0; i < 10; i++) {
+		status0[i] = SPDK_BDEV_IO_STATUS_PENDING;
+		rc = spdk_bdev_read_blocks(g_desc, io_ch[0], NULL, 0, 1, io_during_io_done, &status0[i]);
+		CU_ASSERT(rc == 0);
+	}
+
+	/* Thread 1 queues one I/O and then sends nothing more. */
+	set_thread(1);
+	status1 = SPDK_BDEV_IO_STATUS_PENDING;
+	rc = spdk_bdev_read_blocks(g_desc, io_ch[1], NULL, 0, 1, io_during_io_done, &status1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(status1 == SPDK_BDEV_IO_STATUS_PENDING);
+
+	/* Thread 1 must be served within two timeslices, not after thread 0's 9 queued I/O. */
+	for (rounds = 0; rounds < 5 && status1 == SPDK_BDEV_IO_STATUS_PENDING; rounds++) {
+		spdk_delay_us(1000);
+		poll_threads();
+		set_thread(0);
+		stub_complete_io(g_bdev.io_target, 0);
+		set_thread(1);
+		stub_complete_io(g_bdev.io_target, 0);
+		poll_threads();
+	}
+	CU_ASSERT(status1 == SPDK_BDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(rounds <= 2);
+
+	/* Thread 0's backlog still drains completely. */
+	for (rounds = 0; rounds < 20; rounds++) {
+		spdk_delay_us(1000);
+		poll_threads();
+		set_thread(0);
+		stub_complete_io(g_bdev.io_target, 0);
+		poll_threads();
+	}
+	for (i = 0; i < 10; i++) {
+		CU_ASSERT(status0[i] == SPDK_BDEV_IO_STATUS_SUCCESS);
+	}
+
+	/* Tear down the channels */
+	set_thread(1);
+	spdk_put_io_channel(io_ch[1]);
+	set_thread(0);
+	spdk_put_io_channel(io_ch[0]);
+	poll_threads();
+
+	teardown_test();
+}
+
 static void
 io_during_qos_reset(void)
 {
@@ -3034,6 +3118,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, io_during_reset);
 	CU_ADD_TEST(suite, reset_completions);
 	CU_ADD_TEST(suite, io_during_qos_queue);
+	CU_ADD_TEST(suite, qos_channel_fairness);
 	CU_ADD_TEST(suite, io_during_qos_reset);
 	CU_ADD_TEST(suite, enomem);
 	CU_ADD_TEST(suite, enomem_multi_bdev);
