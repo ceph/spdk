@@ -98,4 +98,33 @@ bool bdev_rbd_get_with_crc32c(void);
  */
 void bdev_rbd_set_with_crc32c(bool enable);
 
+/** Keep the current value of a slow/stuck I/O threshold in bdev_rbd_set_diag(). */
+#define BDEV_RBD_DIAG_KEEP	UINT64_MAX
+
+typedef void (*bdev_rbd_set_diag_cb)(void *cb_arg, int rc);
+
+/**
+ * Get the slow/stuck I/O diagnostics settings.
+ *
+ * \param enable set to whether diagnostics are on.
+ * \param slow_io_ms set to the slow I/O log threshold in ms (0 = off).
+ * \param stuck_io_ms set to the stuck I/O watchdog threshold in ms (0 = off).
+ */
+void bdev_rbd_get_diag(bool *enable, uint64_t *slow_io_ms, uint64_t *stuck_io_ms);
+
+/**
+ * Turn slow/stuck I/O diagnostics on or off at runtime, on every SPDK thread.
+ * Must be called from the app thread after the bdev layer is initialized.
+ *
+ * \param enable true to turn diagnostics on.
+ * \param slow_io_ms slow I/O log threshold in ms (0 = off), or BDEV_RBD_DIAG_KEEP.
+ * \param stuck_io_ms stuck I/O watchdog threshold in ms (0 = off), or BDEV_RBD_DIAG_KEEP.
+ * \param cb_fn called once every thread has the new settings.
+ * \param cb_arg argument for cb_fn.
+ *
+ * \return 0 if started (cb_fn will be called), -EBUSY if a change is in progress.
+ */
+int bdev_rbd_set_diag(bool enable, uint64_t slow_io_ms, uint64_t stuck_io_ms,
+		      bdev_rbd_set_diag_cb cb_fn, void *cb_arg);
+
 #endif /* SPDK_BDEV_RBD_H */
