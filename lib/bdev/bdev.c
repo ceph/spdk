@@ -214,6 +214,12 @@ struct spdk_bdev_qos {
 
 	/** Does the poller have a message queued already */
 	bool busy;
+
+	/** Total channels counted during last polling pass. */
+	uint32_t num_channels;
+
+	/** Channel counter during current polling pass. */
+	uint32_t iter_channels;
 };
 
 struct spdk_bdev_mgmt_channel {
@@ -337,6 +343,12 @@ struct spdk_bdev_channel {
 
 	/** List of I/Os queued by QoS. */
 	bdev_io_tailq_t		qos_queued_io;
+
+	/** Number of timeslices this channel remains quarantined per rate limit type. */
+	uint32_t		qos_greedy_ticks[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
+
+	/** Private quota allocated to quarantined channel per rate limit type. */
+	int64_t			qos_private_quota[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
 };
 
 struct media_event_entry {
@@ -2835,14 +2847,31 @@ bdev_get_io_size_in_byte(struct spdk_bdev_io *bdev_io)
 	}
 }
 
+#define SPDK_BDEV_QOS_HYSTERESIS_TICKS 5
+
 static inline bool
-bdev_qos_rw_queue_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io, uint64_t delta)
+bdev_qos_rw_queue_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io,
+		     enum spdk_bdev_qos_rate_limit_type type, uint64_t delta)
 {
+	struct spdk_bdev_channel *ch = io->internal.ch;
 	int64_t remaining_this_timeslice;
 
 	if (!limit->max_per_timeslice) {
 		/* The QoS is disabled */
 		return false;
+	}
+
+	if (ch != NULL && ch->qos_greedy_ticks[type] > 0) {
+		/* Channel is in quarantine for this rate limit type */
+		if (ch->qos_private_quota[type] + (int64_t)delta > 0) {
+			ch->qos_private_quota[type] -= delta;
+			return false;
+		}
+		/* Exhausted private quota: re-arm hysteresis and queue IO */
+		ch->qos_greedy_ticks[type] = SPDK_BDEV_QOS_HYSTERESIS_TICKS;
+		SPDK_NOTICELOG("[RR_QOS] ch %p [thread %s]: private quota exhausted on %s (delta=%" PRIu64 "), re-armed quarantine\n",
+			       ch, spdk_thread_get_name(spdk_get_thread()), qos_rpc_type[type], delta);
+		return true;
 	}
 
 	remaining_this_timeslice = __atomic_sub_fetch(&limit->remaining_this_timeslice, delta,
@@ -2863,37 +2892,51 @@ bdev_qos_rw_queue_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io,
 	 */
 	__atomic_add_fetch(
 		&limit->remaining_this_timeslice, delta, __ATOMIC_RELAXED);
+
+	if (ch != NULL) {
+		ch->qos_greedy_ticks[type] = SPDK_BDEV_QOS_HYSTERESIS_TICKS;
+		SPDK_NOTICELOG("[RR_QOS] ch %p [thread %s]: shared quota exhausted on %s (delta=%" PRIu64 "), ENTERED QUARANTINE\n",
+			       ch, spdk_thread_get_name(spdk_get_thread()), qos_rpc_type[type], delta);
+	}
+
 	return true;
 }
 
 static inline void
-bdev_qos_rw_rewind_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io, uint64_t delta)
+bdev_qos_rw_rewind_io(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io,
+		      enum spdk_bdev_qos_rate_limit_type type, uint64_t delta)
 {
-	__atomic_add_fetch(&limit->remaining_this_timeslice, delta, __ATOMIC_RELAXED);
+	struct spdk_bdev_channel *ch = io->internal.ch;
+
+	if (ch != NULL && ch->qos_greedy_ticks[type] > 0) {
+		ch->qos_private_quota[type] += delta;
+	} else {
+		__atomic_add_fetch(&limit->remaining_this_timeslice, delta, __ATOMIC_RELAXED);
+	}
 }
 
 static bool
 bdev_qos_rw_iops_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 {
-	return bdev_qos_rw_queue_io(limit, io, 1);
+	return bdev_qos_rw_queue_io(limit, io, SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT, 1);
 }
 
 static void
 bdev_qos_rw_iops_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 {
-	bdev_qos_rw_rewind_io(limit, io, 1);
+	bdev_qos_rw_rewind_io(limit, io, SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT, 1);
 }
 
 static bool
 bdev_qos_rw_bps_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 {
-	return bdev_qos_rw_queue_io(limit, io, bdev_get_io_size_in_byte(io));
+	return bdev_qos_rw_queue_io(limit, io, SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT, bdev_get_io_size_in_byte(io));
 }
 
 static void
 bdev_qos_rw_bps_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 {
-	bdev_qos_rw_rewind_io(limit, io, bdev_get_io_size_in_byte(io));
+	bdev_qos_rw_rewind_io(limit, io, SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT, bdev_get_io_size_in_byte(io));
 }
 
 static bool
@@ -2903,14 +2946,14 @@ bdev_qos_r_bps_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 		return false;
 	}
 
-	return bdev_qos_rw_bps_queue(limit, io);
+	return bdev_qos_rw_queue_io(limit, io, SPDK_BDEV_QOS_R_BPS_RATE_LIMIT, bdev_get_io_size_in_byte(io));
 }
 
 static void
 bdev_qos_r_bps_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 {
 	if (bdev_is_read_io(io) != false) {
-		bdev_qos_rw_rewind_io(limit, io, bdev_get_io_size_in_byte(io));
+		bdev_qos_rw_rewind_io(limit, io, SPDK_BDEV_QOS_R_BPS_RATE_LIMIT, bdev_get_io_size_in_byte(io));
 	}
 }
 
@@ -2921,14 +2964,14 @@ bdev_qos_w_bps_queue(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 		return false;
 	}
 
-	return bdev_qos_rw_bps_queue(limit, io);
+	return bdev_qos_rw_queue_io(limit, io, SPDK_BDEV_QOS_W_BPS_RATE_LIMIT, bdev_get_io_size_in_byte(io));
 }
 
 static void
 bdev_qos_w_bps_rewind_quota(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io)
 {
 	if (bdev_is_read_io(io) != true) {
-		bdev_qos_rw_rewind_io(limit, io, bdev_get_io_size_in_byte(io));
+		bdev_qos_rw_rewind_io(limit, io, SPDK_BDEV_QOS_W_BPS_RATE_LIMIT, bdev_get_io_size_in_byte(io));
 	}
 }
 
@@ -4264,15 +4307,46 @@ bdev_channel_submit_qos_io(struct spdk_bdev_channel_iter *i, struct spdk_bdev *b
 			   struct spdk_io_channel *io_ch, void *ctx)
 {
 	struct spdk_bdev_channel *bdev_ch = __io_ch_to_bdev_ch(io_ch);
-	int status;
+	struct spdk_bdev_qos *qos = bdev->internal.qos;
+	uint32_t num_channels;
+	int limit_idx;
+
+	qos->iter_channels++;
+	num_channels = qos->num_channels > 0 ? qos->num_channels : 1;
+
+	for (limit_idx = 0; limit_idx < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; limit_idx++) {
+		struct spdk_bdev_qos_limit *limit = &qos->rate_limits[limit_idx];
+		uint64_t fair_share;
+
+		if (limit->limit == SPDK_BDEV_QOS_LIMIT_NOT_DEFINED || !limit->max_per_timeslice) {
+			continue;
+		}
+
+		if (bdev_ch->qos_greedy_ticks[limit_idx] > 0) {
+			bdev_ch->qos_greedy_ticks[limit_idx]--;
+			if (bdev_ch->qos_private_quota[limit_idx] > 0) {
+				bdev_ch->qos_private_quota[limit_idx] = 0;
+			}
+			fair_share = limit->max_per_timeslice / num_channels;
+			bdev_ch->qos_private_quota[limit_idx] += spdk_max(limit->min_per_timeslice, fair_share);
+
+			if (bdev_ch->qos_greedy_ticks[limit_idx] == 0) {
+				SPDK_NOTICELOG("[RR_QOS] bdev %s ch %p [thread %s]: RELEASED from quarantine on %s\n",
+					       bdev->name, bdev_ch, spdk_thread_get_name(spdk_get_thread()),
+					       qos_rpc_type[limit_idx]);
+			} else {
+				SPDK_NOTICELOG("[RR_QOS] bdev %s ch %p [thread %s]: poller assigned fair_share=%" PRIu64 " on %s (ticks_left=%u, channels=%u)\n",
+					       bdev->name, bdev_ch, spdk_thread_get_name(spdk_get_thread()),
+					       fair_share, qos_rpc_type[limit_idx],
+					       bdev_ch->qos_greedy_ticks[limit_idx], num_channels);
+			}
+		}
+	}
 
 	bdev_qos_io_submit(bdev_ch, bdev->internal.qos);
 
-	/* if all IOs were sent then continue the iteration, otherwise - stop it */
-	/* TODO: channels round robing */
-	status = TAILQ_EMPTY(&bdev_ch->qos_queued_io) ? 0 : 1;
-
-	spdk_bdev_for_each_channel_continue(i, status);
+	/* Continue iteration across all channels to prevent starvation */
+	spdk_bdev_for_each_channel_continue(i, 0);
 }
 
 
@@ -4280,6 +4354,7 @@ static void
 bdev_channel_submit_qos_io_done(struct spdk_bdev *bdev, void *ctx, int status)
 {
 	if (bdev && bdev->internal.qos) {
+		bdev->internal.qos->num_channels = bdev->internal.qos->iter_channels;
 		bdev->internal.qos->busy = false;
 	}
 }
@@ -4336,6 +4411,7 @@ bdev_channel_poll_qos(void *arg)
 
 	if (!qos->busy) {
 		qos->busy = true;
+		qos->iter_channels = 0;
 		spdk_bdev_for_each_channel(bdev, bdev_channel_submit_qos_io, qos,
 				   	bdev_channel_submit_qos_io_done);
 	}
@@ -4633,6 +4709,8 @@ bdev_channel_create(void *io_device, void *ctx_buf)
 	ch->io_outstanding = 0;
 	TAILQ_INIT(&ch->locked_ranges);
 	TAILQ_INIT(&ch->qos_queued_io);
+	memset(ch->qos_greedy_ticks, 0, sizeof(ch->qos_greedy_ticks));
+	memset(ch->qos_private_quota, 0, sizeof(ch->qos_private_quota));
 	ch->flags = 0;
 	ch->trace_id = bdev->internal.trace_id;
 	ch->shared_resource = shared_resource;
@@ -10282,6 +10360,8 @@ bdev_disable_qos_msg(struct spdk_bdev_channel_iter *i, struct spdk_bdev *bdev,
 	struct spdk_bdev_io *bdev_io;
 
 	bdev_ch->flags &= ~BDEV_CH_QOS_ENABLED;
+	memset(bdev_ch->qos_greedy_ticks, 0, sizeof(bdev_ch->qos_greedy_ticks));
+	memset(bdev_ch->qos_private_quota, 0, sizeof(bdev_ch->qos_private_quota));
 
 	while (!TAILQ_EMPTY(&bdev_ch->qos_queued_io)) {
 		/* Re-submit the queued I/O. */
@@ -11617,6 +11697,7 @@ spdk_bdev_copy_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 }
 
 SPDK_LOG_REGISTER_COMPONENT(bdev)
+SPDK_LOG_REGISTER_COMPONENT(rr_qos)
 
 static void
 bdev_trace(void)
