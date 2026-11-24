@@ -755,7 +755,10 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 	 */
 	thread->next_poller_id = 1;
 
-	thread->messages = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_NUMA_ID_ANY);
+	/* RTS enqueue: a preempted producer must not stall other senders.
+	 * The reactor is the only consumer.
+	 */
+	thread->messages = spdk_ring_create(SPDK_RING_TYPE_MP_RTS_SC, 65536, SPDK_ENV_NUMA_ID_ANY);
 	if (!thread->messages) {
 		SPDK_ERRLOG("Unable to allocate memory for message ring\n");
 		free(thread);

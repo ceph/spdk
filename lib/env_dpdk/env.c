@@ -406,6 +406,9 @@ spdk_ring_create(enum spdk_ring_type type, size_t count, int numa_id)
 	case SPDK_RING_TYPE_MP_MC:
 		flags |= 0;
 		break;
+	case SPDK_RING_TYPE_MP_RTS_SC:
+		flags |= RING_F_MP_RTS_ENQ | RING_F_SC_DEQ;
+		break;
 	default:
 		return NULL;
 	}
