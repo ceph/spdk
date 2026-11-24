@@ -644,12 +644,19 @@ enum spdk_ring_type {
 	SPDK_RING_TYPE_SP_SC,		/* Single-producer, single-consumer */
 	SPDK_RING_TYPE_MP_SC,		/* Multi-producer, single-consumer */
 	SPDK_RING_TYPE_MP_MC,		/* Multi-producer, multi-consumer */
+	/* Multi-producer relaxed-tail enqueue, single-consumer dequeue.
+	 * Producers publish the tail with a compare-exchange instead of
+	 * waiting for the previous producer, so a preempted enqueuer does
+	 * not stall the others.
+	 */
+	SPDK_RING_TYPE_MP_RTS_SC,
 };
 
 /**
  * Create a ring.
  *
- * \param type Type for the ring. (SPDK_RING_TYPE_SP_SC or SPDK_RING_TYPE_MP_SC).
+ * \param type Type for the ring. (SPDK_RING_TYPE_SP_SC, SPDK_RING_TYPE_MP_SC,
+ * SPDK_RING_TYPE_MP_MC, or SPDK_RING_TYPE_MP_RTS_SC).
  * \param count Size of the ring in elements.
  * \param numa_id NUMA node ID to allocate memory on, or SPDK_ENV_NUMA_ID_ANY
  * for any NUMA node.
