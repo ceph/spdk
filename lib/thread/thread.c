@@ -307,14 +307,208 @@ io_channel_cmp(struct spdk_io_channel *ch1, struct spdk_io_channel *ch2)
 
 RB_GENERATE_STATIC(io_channel_tree, spdk_io_channel, node, io_channel_cmp);
 
+struct spdk_msg_cache;
+
 struct spdk_msg {
 	spdk_msg_fn		fn;
 	void			*arg;
+	/* Set when a non-SPDK thread allocated this message. The reactor
+	 * returns it to that thread's stack instead of the shared mempool.
+	 */
+	struct spdk_msg_cache	*owner;
+	struct spdk_msg		*next;
 
 	SLIST_ENTRY(spdk_msg)	link;
 };
 
+/* io_context threads are not SPDK threads, so they miss the per-reactor
+ * message cache and take every spdk_msg from g_spdk_msg_mempool. That
+ * mempool is a classic multi-consumer ring: after the head
+ * compare-exchange the caller spins until the previous owner stores
+ * tail. A preempted owner stalls every other completion thread.
+ *
+ * External callers keep a bounded stack of their own messages. The
+ * reactor pushes it with a compare-exchange. A failed exchange retries;
+ * nobody waits for a preempted thread to publish a tail.
+ */
+#define SPDK_MSG_EXT_CACHE_MAX		256
+#define SPDK_MSG_EXT_CACHE_EXIT_SPINS	100000
+
+struct spdk_msg_cache {
+	struct spdk_msg		*head;
+	uint32_t		depth;
+	uint32_t		inflight;
+	uint32_t		dead;
+};
+
 static struct spdk_mempool *g_spdk_msg_mempool = NULL;
+
+static pthread_key_t g_ext_msg_key;
+static pthread_once_t g_ext_msg_once = PTHREAD_ONCE_INIT;
+static int g_ext_msg_key_rc = -1;
+
+static void ext_msg_cache_destroy(void *arg);
+
+static void
+ext_msg_key_init(void)
+{
+	g_ext_msg_key_rc = pthread_key_create(&g_ext_msg_key, ext_msg_cache_destroy);
+	if (g_ext_msg_key_rc != 0) {
+		SPDK_ERRLOG("external msg cache key create failed: %d\n", g_ext_msg_key_rc);
+	}
+}
+
+static struct spdk_msg *
+ext_cache_pop(struct spdk_msg_cache *cache)
+{
+	struct spdk_msg *head;
+	uint32_t depth;
+
+	head = __atomic_load_n(&cache->head, __ATOMIC_ACQUIRE);
+	while (head != NULL) {
+		if (__atomic_compare_exchange_n(&cache->head, &head, head->next,
+						true, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+			depth = __atomic_load_n(&cache->depth, __ATOMIC_RELAXED);
+			while (depth > 0 &&
+			       !__atomic_compare_exchange_n(&cache->depth, &depth, depth - 1,
+							    true, __ATOMIC_RELAXED,
+							    __ATOMIC_RELAXED)) {
+			}
+			head->next = NULL;
+			return head;
+		}
+	}
+	return NULL;
+}
+
+static void
+ext_cache_push(struct spdk_msg_cache *cache, struct spdk_msg *msg)
+{
+	struct spdk_msg *head;
+
+	head = __atomic_load_n(&cache->head, __ATOMIC_RELAXED);
+	do {
+		msg->next = head;
+	} while (!__atomic_compare_exchange_n(&cache->head, &head, msg,
+					      true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+	__atomic_fetch_add(&cache->depth, 1, __ATOMIC_RELAXED);
+}
+
+static void
+ext_msg_mempool_put(struct spdk_msg *msg)
+{
+	msg->owner = NULL;
+	msg->next = NULL;
+	spdk_mempool_put(g_spdk_msg_mempool, msg);
+}
+
+/* Drop one in-flight message allocated by ext_msg_alloc(). Safe from the
+ * reactor that ran the message and from the allocating thread.
+ */
+static void
+ext_msg_retire(struct spdk_msg *msg)
+{
+	struct spdk_msg_cache *cache = msg->owner;
+
+	if (cache == NULL) {
+		spdk_mempool_put(g_spdk_msg_mempool, msg);
+		return;
+	}
+
+	if (__atomic_load_n(&cache->dead, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&cache->depth, __ATOMIC_RELAXED) >= SPDK_MSG_EXT_CACHE_MAX) {
+		ext_msg_mempool_put(msg);
+	} else {
+		ext_cache_push(cache, msg);
+	}
+	__atomic_fetch_sub(&cache->inflight, 1, __ATOMIC_RELEASE);
+}
+
+static struct spdk_msg_cache *
+ext_msg_cache_get(void)
+{
+	struct spdk_msg_cache *cache;
+
+	pthread_once(&g_ext_msg_once, ext_msg_key_init);
+	if (g_ext_msg_key_rc != 0) {
+		return NULL;
+	}
+
+	cache = pthread_getspecific(g_ext_msg_key);
+	if (cache != NULL) {
+		return cache;
+	}
+
+	cache = calloc(1, sizeof(*cache));
+	if (cache == NULL) {
+		return NULL;
+	}
+	if (pthread_setspecific(g_ext_msg_key, cache) != 0) {
+		free(cache);
+		return NULL;
+	}
+	return cache;
+}
+
+/* Allocate a message for a thread that is not an SPDK thread. */
+static struct spdk_msg *
+ext_msg_alloc(void)
+{
+	struct spdk_msg_cache *cache;
+	struct spdk_msg *msg;
+
+	cache = ext_msg_cache_get();
+	if (cache == NULL) {
+		msg = spdk_mempool_get(g_spdk_msg_mempool);
+		if (msg == NULL) {
+			return NULL;
+		}
+		msg->owner = NULL;
+		msg->next = NULL;
+		return msg;
+	}
+
+	msg = ext_cache_pop(cache);
+	if (msg == NULL) {
+		msg = spdk_mempool_get(g_spdk_msg_mempool);
+		if (msg == NULL) {
+			return NULL;
+		}
+		msg->owner = cache;
+		msg->next = NULL;
+	}
+	__atomic_fetch_add(&cache->inflight, 1, __ATOMIC_RELAXED);
+	return msg;
+}
+
+static void
+ext_msg_cache_destroy(void *arg)
+{
+	struct spdk_msg_cache *cache = arg;
+	struct spdk_msg *msg;
+	unsigned int i;
+
+	if (cache == NULL) {
+		return;
+	}
+
+	__atomic_store_n(&cache->dead, 1, __ATOMIC_RELEASE);
+	for (i = 0; i < SPDK_MSG_EXT_CACHE_EXIT_SPINS; i++) {
+		while ((msg = ext_cache_pop(cache)) != NULL) {
+			ext_msg_mempool_put(msg);
+		}
+		if (__atomic_load_n(&cache->inflight, __ATOMIC_ACQUIRE) == 0 &&
+		    __atomic_load_n(&cache->head, __ATOMIC_ACQUIRE) == NULL) {
+			free(cache);
+			return;
+		}
+		sched_yield();
+	}
+	/* A message is still queued on a reactor. Leaving the cache
+	 * allocated keeps that reactor's retire path valid; it returns
+	 * the message to the mempool.
+	 */
+}
 
 static TAILQ_HEAD(, spdk_thread) g_threads = TAILQ_HEAD_INITIALIZER(g_threads);
 static uint32_t g_thread_count = 0;
@@ -899,12 +1093,15 @@ msg_queue_run_batch(struct spdk_thread *thread, uint32_t max_msgs)
 
 		SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
 
-		if (thread->msg_cache_count < SPDK_MSG_MEMPOOL_CACHE_SIZE) {
+		if (msg->owner != NULL) {
+			ext_msg_retire(msg);
+		} else if (thread->msg_cache_count < SPDK_MSG_MEMPOOL_CACHE_SIZE) {
 			/* Insert the messages at the head. We want to re-use the hot
 			 * ones. */
 			SLIST_INSERT_HEAD(&thread->msg_cache, msg, link);
 			thread->msg_cache_count++;
 		} else {
+			msg->next = NULL;
 			spdk_mempool_put(g_spdk_msg_mempool, msg);
 		}
 	}
@@ -1437,11 +1634,21 @@ spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx
 			assert(msg != NULL);
 			SLIST_REMOVE_HEAD(&local_thread->msg_cache, link);
 			local_thread->msg_cache_count--;
+			msg->owner = NULL;
+			msg->next = NULL;
 		}
 	}
 
 	if (msg == NULL) {
-		msg = spdk_mempool_get(g_spdk_msg_mempool);
+		if (local_thread == NULL) {
+			msg = ext_msg_alloc();
+		} else {
+			msg = spdk_mempool_get(g_spdk_msg_mempool);
+			if (msg != NULL) {
+				msg->owner = NULL;
+				msg->next = NULL;
+			}
+		}
 		if (!msg) {
 			SPDK_ERRLOG("msg could not be allocated\n");
 			return -ENOMEM;
@@ -1454,7 +1661,12 @@ spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx
 	rc = spdk_ring_enqueue(thread->messages, (void **)&msg, 1, NULL);
 	if (rc != 1) {
 		SPDK_ERRLOG("msg could not be enqueued\n");
-		spdk_mempool_put(g_spdk_msg_mempool, msg);
+		if (msg->owner != NULL) {
+			ext_msg_retire(msg);
+		} else {
+			msg->next = NULL;
+			spdk_mempool_put(g_spdk_msg_mempool, msg);
+		}
 		return -EIO;
 	}
 
